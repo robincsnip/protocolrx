@@ -158,15 +158,30 @@ function ProtocolCard({ protocol, onActivate, isActivating }: { protocol: Protoc
   );
 }
 
+// Parse a duration string like "3 months" or "6 weeks" into days
+function parseDurationDays(duration: string | null): number | null {
+  if (!duration) return null;
+  const m = duration.match(/(\d+)\s*(day|week|month|year)/i);
+  if (!m) return null;
+  const n = parseInt(m[1]);
+  const unit = m[2].toLowerCase();
+  if (unit.startsWith("day")) return n;
+  if (unit.startsWith("week")) return n * 7;
+  if (unit.startsWith("month")) return n * 30;
+  if (unit.startsWith("year")) return n * 365;
+  return null;
+}
+
 // ─── Active protocol card (expandable) ───────────────────────────────────────
 function ActiveProtocolCard({ up, onCheckin, onPause, onResume, onComplete }: {
   up: UserProtocol; onCheckin: () => void; onPause: () => void; onResume: () => void; onComplete: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const p = up.protocol;
-  const score = up.adherenceScore ?? 0;
   const daysSince = Math.floor((Date.now() - new Date(up.startedAt).getTime()) / 86400000);
   const isPaused = up.status === "paused";
+  const totalDays = parseDurationDays(p?.duration ?? null);
+  const progressPct = totalDays ? Math.min(100, Math.round((daysSince / totalDays) * 100)) : null;
 
   return (
     <div className={`rounded-xl border bg-card transition-colors ${up.conflictFlag ? "border-amber-500/40" : isPaused ? "border-border/30 opacity-70" : "border-border/60 hover:border-primary/30"}`}>
@@ -194,21 +209,23 @@ function ActiveProtocolCard({ up, onCheckin, onPause, onResume, onComplete }: {
               </p>
             )}
             <p className="text-xs text-muted-foreground mt-0.5">
-              Day {daysSince + 1}{p?.duration ? ` · ${p.duration}` : ""}
-              {up.lastCheckinAt && ` · Last check-in ${timeAgo(up.lastCheckinAt)}`}
+              Day {daysSince + 1}{p?.duration ? ` of ${p.duration}` : ""}
+              {up.lastCheckinAt && ` · Last logged ${timeAgo(up.lastCheckinAt)}`}
             </p>
           </div>
           <ChevronRight className={`w-4 h-4 text-muted-foreground shrink-0 transition-transform mt-1 ${expanded ? "rotate-90" : ""}`} />
         </div>
 
-        {/* Adherence bar */}
-        <div className="mt-3">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-muted-foreground">Adherence</span>
-            <span className="text-xs font-semibold text-foreground">{Math.round(score)}%</span>
+        {/* Duration progress bar — only shown when duration is known */}
+        {progressPct !== null && (
+          <div className="mt-3">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-muted-foreground">Time elapsed</span>
+              <span className="text-xs font-semibold text-foreground">{progressPct}%</span>
+            </div>
+            <Progress value={progressPct} className="h-1.5" />
           </div>
-          <Progress value={score} className="h-1.5" />
-        </div>
+        )}
 
         {/* Conflict details */}
         {up.conflictFlag && up.conflictDetails && (
@@ -356,8 +373,7 @@ export default function Dashboard() {
     setCrossRefLoading(true);
     setCrossRef(null);
     try {
-      const res = await apiRequest("POST", "/api/protocols/cross-reference");
-      const data = await res.json();
+      const data = await apiRequest("POST", "/api/protocols/cross-reference");
       setCrossRef(data);
       setTab("active");
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -411,7 +427,7 @@ export default function Dashboard() {
           <div className="flex gap-3 flex-wrap">
             {[
               { label: "Active", value: activeProtocols.length, icon: Activity, color: "text-primary" },
-              { label: "Avg adherence", value: activeProtocols.length ? `${Math.round(activeProtocols.reduce((s, p) => s + (p.adherenceScore ?? 0), 0) / activeProtocols.length)}%` : "—", icon: Zap, color: "text-emerald-400" },
+              { label: "On hold", value: pausedProtocols.length, icon: Pause, color: "text-sky-400" },
               { label: "Conflicts", value: activeProtocols.filter(p => p.conflictFlag).length, icon: AlertTriangle, color: "text-amber-400" },
             ].map(({ label, value, icon: Icon, color }) => (
               <div key={label} className="bg-card border border-border/50 rounded-xl px-4 py-2.5 text-center">
