@@ -233,8 +233,8 @@ export async function registerRoutes(httpServer: Server, app: Express) {
       const webhookSecret = require("crypto").randomBytes(24).toString("hex");
       await storage.updateUser(req.userId!, { axonUrl: baseUrl, axonUserId: axonData.user?.id, axonWebhookSecret: webhookSecret } as any);
       // Determine self URL for AXON to forward protocol.push events back to us
-      const selfUrl = process.env.APP_URL || process.env.RAILWAY_STATIC_URL
-        ? `https://${process.env.RAILWAY_STATIC_URL}` : null;
+      const selfUrl = process.env.APP_URL
+        || (process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}` : null);
       // Register with AXON: pass moduleToken (userId:secret) so AXON can identify our user on forwarding
       const moduleToken = `${req.userId}:${webhookSecret}`;
       await fetch(`${baseUrl}/api/modules/protocolrx/connect`, {
