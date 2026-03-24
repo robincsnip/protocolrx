@@ -565,7 +565,7 @@ function SupplementsTab({ userId }: { userId: number }) {
           {(analysis.timingSchedule ?? []).length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-semibold text-sky-400 uppercase tracking-wide">Recommended timing schedule</p>
-              {analysis.timingSchedule.map((slot, i) => (
+              {(analysis.timingSchedule ?? []).map((slot, i) => (
                 <div key={i} className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
                   <p className="text-xs font-bold text-sky-400 mb-1.5">{slot.time}</p>
                   <div className="flex flex-wrap gap-1.5 mb-1.5">
@@ -595,8 +595,8 @@ function SupplementsTab({ userId }: { userId: number }) {
               synergy: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
               timing_conflict: "text-amber-400 bg-amber-500/10 border-amber-500/20",
             };
-            const issues = analysis.interactions.filter(ix => ix.type !== "synergy");
-            const synergies = analysis.interactions.filter(ix => ix.type === "synergy");
+            const issues = (analysis.interactions ?? []).filter(ix => ix.type !== "synergy");
+            const synergies = (analysis.interactions ?? []).filter(ix => ix.type === "synergy");
             return (
               <>
                 {issues.length > 0 && (
@@ -638,7 +638,7 @@ function SupplementsTab({ userId }: { userId: number }) {
           {(analysis.items ?? []).length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Dosage vs protocol</p>
-              {analysis.items.map((item, i) => (
+              {(analysis.items ?? []).map((item, i) => (
                 <div key={i} className="flex items-start gap-3 rounded-lg border border-border/50 bg-muted/20 p-3">
                   <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border shrink-0 mt-0.5 ${statusStyle[item.status] || "text-muted-foreground bg-muted border-border"}`}>
                     {statusLabel[item.status] || item.status}
@@ -661,7 +661,7 @@ function SupplementsTab({ userId }: { userId: number }) {
             <div className="space-y-2">
               <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Missing from your stack</p>
               <div className="flex flex-wrap gap-2">
-                {analysis.missingFromStack.map((s, i) => (
+                {(analysis.missingFromStack ?? []).map((s, i) => (
                   <span key={i} className="text-xs font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">{s}</span>
                 ))}
               </div>
@@ -672,7 +672,7 @@ function SupplementsTab({ userId }: { userId: number }) {
           {(analysis.stackOptimisation ?? []).length > 0 && (
             <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-1.5">
               <p className="text-xs font-semibold text-primary uppercase tracking-wide">Stack optimisation</p>
-              {analysis.stackOptimisation.map((tip, i) => (
+              {(analysis.stackOptimisation ?? []).map((tip, i) => (
                 <p key={i} className="text-xs text-foreground/80">→ {tip}</p>
               ))}
             </div>
