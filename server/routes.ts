@@ -262,30 +262,36 @@ export async function registerRoutes(httpServer: Server, app: Express) {
       const apiKey = process.env.PERPLEXITY_API_KEY;
       if (!apiKey) return res.status(500).json({ error: "AI not configured" });
 
-      const prompt = `You are a clinical nutritionist. Look up evidence-based information about the supplement: "${name.trim()}"
+      const prompt = `You are a clinical nutritionist. Look up the exact supplement: "${name.trim()}"
 
-RESPOND ONLY WITH VALID JSON. No markdown, no explanation. Start with { and end with }.
+RESPOND ONLY WITH VALID JSON. No markdown. Start with { and end with }.
 
-Return this exact structure:
+CRITICAL: If this is an AM/PM, morning/evening, or split-dose product, set hasSplitDose=true and populate splitSchedule with EACH component separately. Never collapse a 3+3 capsule product into "3 capsules daily".
+
 {
-  "name": "full correct name of the supplement (e.g. Vitamin D3 (Cholecalciferol))",
-  "commonDose": "most common supplemental dose as a number (e.g. 2000)",
-  "unit": "unit — must be one of: mg, mcg, IU, g, ml, mmol, capsule, tablet",
-  "frequency": "one of: daily, twice daily, three times daily, every other day, weekly",
-  "typicalRange": "typical safe supplemental range for healthy adults (e.g. 1000-5000 IU/day)",
-  "upperLimit": "tolerable upper intake level if known (e.g. 4000 IU/day)",
-  "bestTiming": "when to take it for best absorption (1 sentence)",
-  "notes": "1-2 sentence plain-English note about this supplement and what it does",
-  "warnings": "key safety consideration or empty string"
+  "name": "exact product name",
+  "hasSplitDose": false,
+  "commonDose": "total daily dose as a number if single formula, or null if split-dose",
+  "unit": "one of: mg mcg IU g ml mmol capsule tablet",
+  "frequency": "one of: daily twice daily three times daily every other day weekly",
+  "splitSchedule": [
+    { "time": "e.g. Morning with breakfast", "dose": "3", "unit": "capsule", "notes": "AM formula" },
+    { "time": "e.g. Evening with dinner", "dose": "3", "unit": "capsule", "notes": "PM formula" }
+  ],
+  "typicalRange": "safe supplemental range (e.g. 1000-5000 IU/day)",
+  "upperLimit": "tolerable upper intake level or empty string",
+  "bestTiming": "when to take it (1 sentence)",
+  "notes": "1-2 sentence plain-English description",
+  "warnings": "key safety note or empty string"
 }`;
 
       const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "sonar-pro",
+          model: "sonar",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 600,
+          max_tokens: 800,
         }),
       });
       const aiData = await aiRes.json() as any;
@@ -359,60 +365,37 @@ Return this exact structure:
           }).join("\n")
         : "(no active protocols)";
 
-      const prompt = `You are a clinical pharmacist and nutritionist with deep knowledge of pharmacokinetics, receptor pharmacology, and nutrient biochemistry. Perform a comprehensive analysis of this patient's supplement stack.
+      const prompt = `You are a clinical pharmacist. Analyse this supplement stack vs active protocols. Be specific about mechanisms.
 
-RESPOND ONLY WITH VALID JSON. No markdown. Start with { and end with }.
+RESPOND ONLY WITH VALID JSON. No markdown. Start with { end with }.
 
-CURRENT SUPPLEMENTS (name: dose unit frequency, timing notes):
+SUPPLEMENTS:
 ${supplementList}
 
-ACTIVE HEALTH PROTOCOLS (AI-generated recommendations):
+PROTOCOLS:
 ${protocolList}
 
-ANALYSIS REQUIREMENTS — be thorough and specific:
-1. RECEPTOR & TRANSPORTER COMPETITION: Identify supplements sharing the same transporters or receptors (e.g. zinc/copper via ZIP transporters, calcium/magnesium via TRPM7, iron/zinc via DMT1, competing amino acids via LAT1). Flag where one will inhibit absorption of another at the doses given.
-2. TIMING CONFLICTS: Identify pairs that must NOT be taken together due to absorption interference (e.g. calcium blocks iron absorption, zinc reduces copper, fat-soluble vitamins compete, stimulants affect sleep supplements). Provide a concrete recommended separation window in hours.
-3. SYNERGIES: Identify beneficial combinations where one enhances the other (e.g. Vitamin D3+K2, Vitamin C+Iron, Magnesium+B6, Zinc+B6 for P5P conversion).
-4. COUNTERACTION: Identify where supplements work against each other therapeutically (e.g. melatonin + stimulants, omega-3 anticoagulant effect + other blood thinners, adaptogen combinations).
-5. DOSAGE VS PROTOCOL: Compare actual intake to protocol recommendations — flag gaps, excesses, and what's missing.
-
-Return this exact JSON (no extra fields, no markdown):
+Return:
 {
-  "summary": "3-4 sentence clinical overview of this stack",
+  "summary": "2-3 sentence clinical overview",
   "overallRisk": "low|moderate|high",
-  "items": [
-    {
-      "name": "supplement name",
-      "currentDose": "e.g. 5000 IU daily — or null",
-      "recommendedDose": "from protocol — or null if no protocol",
-      "status": "sufficient | insufficient | excess | not_in_protocol | not_taking",
-      "note": "1 sentence clinical note on this specific dose"
-    }
-  ],
-  "timingSchedule": [
-    {
-      "time": "e.g. Morning with breakfast",
-      "supplements": ["Supplement A", "Supplement B"],
-      "reason": "Why these go together at this time"
-    }
-  ],
-  "interactions": [
-    {
-      "supplements": ["name1", "name2"],
-      "type": "absorption_competition | receptor_competition | counteraction | synergy | timing_conflict",
-      "risk": "low|moderate|high",
-      "reason": "Specific mechanism in plain English (e.g. 'Zinc and copper share the ZIP family transporters — taking both together at these doses will reduce copper absorption by ~40%')",
-      "recommendation": "Concrete action (e.g. 'Take copper 4+ hours apart from zinc, or reduce zinc to 15mg')"
-    }
-  ],
-  "missingFromStack": ["supplement recommended by protocol but not being taken"],
-  "stackOptimisation": ["1-2 sentence actionable tip to improve the stack"]
+  "timingSchedule": [{"time":"Morning with food","supplements":["A","B"],"reason":"why"}],
+  "interactions": [{
+    "supplements":["A","B"],
+    "type":"absorption_competition|receptor_competition|counteraction|synergy|timing_conflict",
+    "risk":"low|moderate|high",
+    "reason":"specific mechanism (e.g. ZIP transporter competition, 40% absorption reduction)",
+    "recommendation":"concrete fix"
+  }],
+  "items": [{"name":"X","currentDose":"5000 IU daily","recommendedDose":"5000 IU","status":"sufficient|insufficient|excess|not_in_protocol|not_taking","note":"1 sentence"}],
+  "missingFromStack": ["protocol-recommended supplement not being taken"],
+  "stackOptimisation": ["actionable tip"]
 }`;
 
       const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 5000 }),
+        body: JSON.stringify({ model: "sonar", messages: [{ role: "user", content: prompt }], max_tokens: 3000 }),
       });
       const aiData = await aiRes.json() as any;
       const raw = aiData.choices?.[0]?.message?.content || "{}";
@@ -492,7 +475,7 @@ Return this JSON structure:
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "sonar-pro",
+          model: "sonar",
           messages: [{ role: "user", content: prompt }],
           max_tokens: 2000,
         }),

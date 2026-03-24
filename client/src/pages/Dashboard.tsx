@@ -279,7 +279,9 @@ const statusLabel: Record<string, string> = {
   not_in_protocol: "Not in protocol", not_taking: "Not taking",
 };
 
-interface LookupResult { name: string; commonDose: string; unit: string; frequency: string;
+interface SplitSlot { time: string; dose: string; unit: string; notes: string; }
+interface LookupResult { name: string; hasSplitDose?: boolean; commonDose: string; unit: string; frequency: string;
+  splitSchedule?: SplitSlot[];
   typicalRange: string; upperLimit: string; bestTiming: string; notes: string; warnings: string; }
 
 function SupplementsTab({ userId }: { userId: number }) {
@@ -332,14 +334,17 @@ function SupplementsTab({ userId }: { userId: number }) {
     setAddMode("looking");
     try {
       const data: LookupResult = await apiRequest("POST", "/api/supplements/lookup", { name: searchQuery.trim() });
-      if (data.error) throw new Error((data as any).error);
+      if ((data as any).error) throw new Error((data as any).error);
       setLookupResult(data);
+      // Split-dose products (e.g. AM/PM multivitamins): pre-fill with first slot
+      // Each slot will be saved as a separate supplement entry
+      const firstSlot = data.hasSplitDose && data.splitSchedule?.[0];
       setForm({
         name: data.name || searchQuery.trim(),
-        dose: data.commonDose || "",
-        unit: data.unit || "mg",
+        dose: firstSlot ? firstSlot.dose : (data.commonDose || ""),
+        unit: firstSlot ? firstSlot.unit : (data.unit || "mg"),
         frequency: data.frequency || "daily",
-        notes: data.bestTiming || "",
+        notes: firstSlot ? `${firstSlot.time}${firstSlot.notes ? ` — ${firstSlot.notes}` : ""}` : (data.bestTiming || ""),
       });
       setAddMode("confirm");
     } catch (e: any) {
@@ -355,10 +360,36 @@ function SupplementsTab({ userId }: { userId: number }) {
     setAddMode("confirm");
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!form.name.trim() || !form.dose.trim()) return;
-    if (editId) { editM.mutate({ id: editId, data: form }); }
-    else { addM.mutate({ ...form, userId }); }
+    if (editId) {
+      editM.mutate({ id: editId, data: form });
+      return;
+    }
+    // Split-dose product: save each slot separately
+    const slots = lookupResult?.hasSplitDose && lookupResult.splitSchedule?.length
+      ? lookupResult.splitSchedule
+      : null;
+    if (slots) {
+      try {
+        for (const slot of slots) {
+          await apiRequest("POST", "/api/supplements", {
+            userId,
+            name: lookupResult!.name,
+            dose: slot.dose,
+            unit: slot.unit,
+            frequency: "daily",
+            notes: `${slot.time}${slot.notes ? ` — ${slot.notes}` : ""}`,
+          });
+        }
+        refetch(); resetAdd();
+        toast({ title: `Added ${slots.length} formulas`, description: `${lookupResult!.name} saved as ${slots.length} separate entries.` });
+      } catch (e: any) {
+        toast({ title: "Failed", description: e.message, variant: "destructive" });
+      }
+    } else {
+      addM.mutate({ ...form, userId });
+    }
   }
 
   async function runAnalysis() {
@@ -451,6 +482,19 @@ function SupplementsTab({ userId }: { userId: number }) {
                 <div className="flex items-start gap-1.5 bg-amber-500/10 rounded-lg p-2 border border-amber-500/20 mt-1">
                   <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
                   <span className="text-amber-300">{lookupResult.warnings}</span>
+                </div>
+              )}
+              {/* Split-dose notice */}
+              {lookupResult.hasSplitDose && lookupResult.splitSchedule && lookupResult.splitSchedule.length > 0 && (
+                <div className="bg-sky-500/10 border border-sky-500/20 rounded-lg p-2.5 space-y-2">
+                  <p className="text-sky-400 font-semibold">Split-dose product — {lookupResult.splitSchedule.length} separate formulas</p>
+                  {lookupResult.splitSchedule.map((slot, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <span className="text-sky-300 font-bold">{slot.dose} {slot.unit}</span>
+                      <span className="text-muted-foreground">{slot.time}{slot.notes ? ` — ${slot.notes}` : ""}</span>
+                    </div>
+                  ))}
+                  <p className="text-muted-foreground text-[10px]">Each formula below will be saved as a separate entry in your stack.</p>
                 </div>
               )}
             </div>
@@ -761,14 +805,15 @@ export default function Dashboard() {
 
   const { data: userProtocols, refetch: refetchActive } = useQuery<UserProtocol[]>({
     queryKey: ["/api/user/protocols"],
-    // Refetch every 15 seconds so pushed protocols appear without relogin
-    refetchInterval: 15000,
-    refetchOnWindowFocus: true,
+    refetchInterval: 10000,          // poll every 10s
+    refetchOnWindowFocus: "always",  // always refetch on tab focus, no debounce
+    staleTime: 0,                    // always treat as stale — never show cached version
   });
   const { data: library } = useQuery<Protocol[]>({
     queryKey: ["/api/protocols"],
-    refetchInterval: 15000,
-    refetchOnWindowFocus: true,
+    refetchInterval: 10000,
+    refetchOnWindowFocus: "always",
+    staleTime: 0,
   });
   const { data: nudges, refetch: refetchNudges } = useQuery<Nudge[]>({ queryKey: ["/api/nudges"] });
 
