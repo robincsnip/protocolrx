@@ -210,6 +210,21 @@ export const storage = {
     );
     return rows.map(mapUserProtocol);
   },
+  async getUserProtocolById(id: number): Promise<UserProtocol | undefined> {
+    const { rows } = await pool.query(
+      `SELECT * FROM prx_user_protocols WHERE id = $1`, [id]
+    );
+    if (!rows[0]) return undefined;
+    const r = rows[0];
+    return {
+      id: r.id, userId: r.user_id, protocolId: r.protocol_id,
+      status: r.status, startedAt: r.started_at, completedAt: r.completed_at ?? null,
+      conflictFlag: r.conflict_flag, conflictDetails: r.conflict_details ?? null,
+      adherenceScore: r.adherence_score ?? null, lastCheckinAt: r.last_checkin_at ?? null,
+      notes: r.notes ?? null,
+    } as UserProtocol;
+  },
+
   async updateUserProtocol(id: number, fields: Partial<UserProtocol>): Promise<void> {
     const colMap: Record<string, string> = { status: "status", conflictFlag: "conflict_flag",
       conflictDetails: "conflict_details", adherenceScore: "adherence_score",

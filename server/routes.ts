@@ -85,16 +85,38 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
-  // PATCH update status (pause/complete/cancel)
+  // PATCH update status (pause/resume/complete/cancel)
   app.patch("/api/user/protocols/:id", requireAuth, async (req: AuthRequest, res: Response) => {
     try {
       const { status, notes } = req.body;
+      const up = await storage.getUserProtocolById(parseInt(req.params.id));
+      if (!up || up.userId !== req.userId) return res.status(403).json({ error: "Access denied" });
       const updates: any = {};
       if (status) updates.status = status;
       if (notes !== undefined) updates.notes = notes;
       if (status === "completed") updates.completedAt = new Date() as any;
       await storage.updateUserProtocol(parseInt(req.params.id), updates);
+      // Emit pause/resume event to AXON
+      const user = await storage.getUserById(req.userId!);
+      if (status === "paused" || status === "active") {
+        emitAxonEvent(user, status === "paused" ? "protocol.paused" : "protocol.resumed", {
+          userProtocolId: up.id,
+        });
+      }
       res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // PUT /api/user/protocols/:id/pause — toggle on hold (removes from cross-reference)
+  app.put("/api/user/protocols/:id/pause", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const up = await storage.getUserProtocolById(parseInt(req.params.id));
+      if (!up || up.userId !== req.userId) return res.status(403).json({ error: "Access denied" });
+      const newStatus = up.status === "paused" ? "active" : "paused";
+      await storage.updateUserProtocol(up.id, { status: newStatus });
+      const user = await storage.getUserById(req.userId!);
+      emitAxonEvent(user, newStatus === "paused" ? "protocol.paused" : "protocol.resumed", { userProtocolId: up.id });
+      res.json({ ok: true, status: newStatus });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
@@ -128,23 +150,39 @@ export async function registerRoutes(httpServer: Server, app: Express) {
   });
 
   // ── Inbound webhook from AXON / BioMarkerLab ─────────────────────────────
-  // Receives a protocol from another module and stores it in the library
+  // Receives a protocol from another module and stores it in the library.
+  // AXON sends moduleToken as 'prxUserId' in format "userId:webhookSecret".
   app.post("/api/webhook/protocol", async (req, res) => {
     try {
-      const { protocol, prxUserId, secret } = req.body;
+      const { protocol, prxUserId, secret, conditionName, sequenceHint } = req.body;
       if (!prxUserId || !protocol) return res.status(400).json({ error: "prxUserId and protocol required." });
-      const user = await storage.getUserById(Number(prxUserId));
+
+      // Parse userId:secret compound token (sent by AXON forwarding)
+      let resolvedUserId: number;
+      let resolvedSecret: string | undefined = secret;
+      if (typeof prxUserId === "string" && prxUserId.includes(":")) {
+        const [uidStr, embeddedSecret] = prxUserId.split(":");
+        resolvedUserId = parseInt(uidStr);
+        resolvedSecret = embeddedSecret;
+      } else {
+        resolvedUserId = Number(prxUserId);
+      }
+
+      const user = await storage.getUserById(resolvedUserId);
       if (!user) return res.status(404).json({ error: "User not found." });
       // Validate secret
-      if (user.axonWebhookSecret && secret !== user.axonWebhookSecret) {
+      if (user.axonWebhookSecret && resolvedSecret !== user.axonWebhookSecret) {
         return res.status(401).json({ error: "Invalid secret." });
       }
       // Save protocol to library for this user
       const saved = await storage.createProtocol({
         sourceModule: protocol.sourceModule ?? "biomarkerlab",
-        sourceUserId: Number(prxUserId),
-        name: protocol.recommendation || protocol.name,
-        description: protocol.rationale,
+        sourceUserId: resolvedUserId,
+        name: protocol.recommendation || protocol.name || conditionName || "Protocol",
+        description: [
+          protocol.rationale,
+          sequenceHint ? `📍 Sequence note: ${sequenceHint}` : null,
+        ].filter(Boolean).join(" • ") || undefined,
         category: protocol.category ?? "supplements",
         priority: protocol.priority ?? "medium",
         protocolId: protocol.protocol?.protocol_id ?? undefined,
@@ -159,11 +197,18 @@ export async function registerRoutes(httpServer: Server, app: Express) {
         isPublic: false,
       });
       // Auto-activate if requested
-      if (req.body.autoActivate) {
-        const { hasConflict, conflicts } = await storage.checkConflicts(Number(prxUserId), saved);
-        const up = await storage.activateProtocol(Number(prxUserId), saved.id);
+      if (req.body.autoActivate !== false) {
+        const { hasConflict, conflicts } = await storage.checkConflicts(resolvedUserId, saved);
+        const up = await storage.activateProtocol(resolvedUserId, saved.id);
         if (hasConflict) {
           await storage.updateUserProtocol(up.id, { conflictFlag: true, conflictDetails: conflicts as any });
+          await storage.createNudge({
+            userId: resolvedUserId,
+            userProtocolId: up.id,
+            type: "conflict_alert",
+            title: `⚠️ Conflict: ${saved.name}`,
+            body: conflicts.map((c: any) => c.reason).join(" "),
+          });
         }
         return res.json({ saved, activated: true, hasConflict, conflicts });
       }
@@ -187,10 +232,15 @@ export async function registerRoutes(httpServer: Server, app: Express) {
       const axonData = await axonRes.json() as any;
       const webhookSecret = require("crypto").randomBytes(24).toString("hex");
       await storage.updateUser(req.userId!, { axonUrl: baseUrl, axonUserId: axonData.user?.id, axonWebhookSecret: webhookSecret } as any);
+      // Determine self URL for AXON to forward protocol.push events back to us
+      const selfUrl = process.env.APP_URL || process.env.RAILWAY_STATIC_URL
+        ? `https://${process.env.RAILWAY_STATIC_URL}` : null;
+      // Register with AXON: pass moduleToken (userId:secret) so AXON can identify our user on forwarding
+      const moduleToken = `${req.userId}:${webhookSecret}`;
       await fetch(`${baseUrl}/api/modules/protocolrx/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": `Bearer ${axonData.token}` },
-        body: JSON.stringify({ moduleToken: webhookSecret }),
+        body: JSON.stringify({ moduleToken, moduleUrl: selfUrl }),
       });
       res.json({ ok: true });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
