@@ -356,29 +356,26 @@ CRITICAL RULE on hasSplitDose — read carefully:
         `- ${s.name}: ${s.dose} ${s.unit} ${s.frequency}${s.notes ? ` (${s.notes})` : ""}`
       ).join("\n");
 
-      const prompt = `You are a nutritional biochemist. The user takes the following supplements daily. For each product, look up its label and extract every individual vitamin, mineral, and active compound with the exact amount provided by that product at the stated dose.
+      const prompt = `You are a nutritional biochemist with access to supplement label databases.
+The user takes these products. For each one, list every nutrient/ingredient from its actual label at the given dose.
 
-RESPOND ONLY WITH VALID JSON. No markdown. Start with { end with }.
+RESPOND ONLY WITH VALID JSON. Start with { end with }. No markdown, no explanation.
 
-PRODUCTS:
+PRODUCTS TAKEN DAILY:
 ${productList}
 
-IMPORTANT:
-- For multivitamins, list EVERY ingredient (all vitamins, minerals, cofactors).
-- If a product appears multiple times (AM + PM formula), combine/list them separately as appropriate.
-- Use standard nutrient names (e.g. "Vitamin D3", "Magnesium", "Zinc", "Vitamin B12").
-- Express all amounts in the unit shown on the label (mg, mcg, IU, etc.).
-- Where a product provides a nutrient across multiple entries (e.g. AM+PM multi), add them together into one total.
+RULES:
+- Use the real label data for each named product (search for it if needed).
+- For each nutrient found across ALL products, sum the total daily intake.
+- If a supplement is listed twice (AM + PM), include both contributions.
+- Only list nutrients with known amounts — do not guess.
+- Nutrient names must be standard ("Vitamin D3", "Zinc", "Magnesium", "Vitamin B12", etc.).
+- Return amounts as strings in the label unit.
 
-Return:
 {
   "nutrients": [
-    {
-      "name": "Vitamin D3",
-      "totalDailyDose": "4000",
-      "unit": "IU",
-      "sources": ["Thorne Multi-Vitamin Elite AM/PM", "AG1"]
-    }
+    { "name": "Vitamin D3", "totalDailyDose": "4000", "unit": "IU", "sources": ["Product A", "Product B"] },
+    { "name": "Magnesium", "totalDailyDose": "600", "unit": "mg", "sources": ["Product B"] }
   ]
 }`;
 
