@@ -266,11 +266,12 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
 RESPOND ONLY WITH VALID JSON. No markdown. Start with { and end with }.
 
-CRITICAL RULE on hasSplitDose:
-- Set hasSplitDose=TRUE ONLY if this product has TWO PHYSICALLY DIFFERENT FORMULAS sold together (e.g. Thorne Multi-Vitamin Elite AM/PM has a distinct AM capsule blend and a distinct PM capsule blend).
-- Set hasSplitDose=FALSE if it is simply ONE formula taken twice daily, split into morning and evening doses (e.g. magnesium taken 200mg morning + 200mg evening = 400mg/day is NOT split-dose).
-- For true split-dose products, set commonDose=null and populate splitSchedule.
-- For all others, set commonDose to the total daily amount as a number.
+CRITICAL RULE on hasSplitDose — read carefully:
+- hasSplitDose=TRUE: ONLY when the product physically contains two different capsule/tablet formulas in one package (e.g. "AM formula" and "PM formula" with different ingredients). Example: Thorne Multi-Vitamin Elite AM/PM.
+- hasSplitDose=FALSE: for ALL other supplements, including those recommended to be taken twice daily or split across meals. Magnesium, zinc, vitamin D, fish oil, etc. are NEVER split-dose even if the instructions say "take 2 tablets twice daily". These are one formula, one product.
+- When hasSplitDose=FALSE: set commonDose to the TOTAL daily dose as a single number (e.g. if 200mg twice daily → commonDose="400", unit="mg").
+- When hasSplitDose=TRUE: set commonDose=null, populate splitSchedule with each formula.
+- If unsure: default to hasSplitDose=FALSE.
 
 {
   "name": "exact product name",
