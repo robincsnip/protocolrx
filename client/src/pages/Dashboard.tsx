@@ -26,8 +26,10 @@ interface SupplementAnalysis {
   summary: string;
   overallRisk: "low" | "moderate" | "high";
   items: { name: string; currentDose: string | null; recommendedDose: string | null; status: string; note: string }[];
-  interactions: { supplements: string[]; risk: string; reason: string }[];
+  timingSchedule: { time: string; supplements: string[]; reason: string }[];
+  interactions: { supplements: string[]; type: string; risk: string; reason: string; recommendation: string }[];
   missingFromStack: string[];
+  stackOptimisation: string[];
 }
 
 // ─── Category colours ─────────────────────────────────────────────────────────
@@ -512,14 +514,17 @@ function SupplementsTab({ userId }: { userId: number }) {
       ) : (
         <div className="space-y-2">
           {(supplements ?? []).map(s => (
-            <div key={s.id} className="flex items-center gap-3 rounded-xl border border-border/60 bg-card px-4 py-3">
-              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center shrink-0">
-                <Pill className="w-4 h-4 text-violet-400" />
+            <div key={s.id} className="flex items-center gap-4 rounded-xl border border-border/60 bg-card px-4 py-3">
+              {/* Dosage — the primary fact */}
+              <div className="shrink-0 text-center min-w-[56px]">
+                <p className="text-lg font-bold text-foreground leading-none">{s.dose}</p>
+                <p className="text-[10px] font-semibold text-violet-400 uppercase tracking-wide mt-0.5">{s.unit}</p>
               </div>
+              <div className="w-px h-8 bg-border/60 shrink-0" />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-foreground">{s.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {s.dose} {s.unit} · {s.frequency}{s.notes ? ` · ${s.notes}` : ""}
+                <p className="text-sm font-semibold text-foreground leading-snug">{s.name}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {s.frequency}{s.notes ? ` · ${s.notes}` : ""}
                 </p>
               </div>
               <div className="flex items-center gap-1 shrink-0">
@@ -539,11 +544,12 @@ function SupplementsTab({ userId }: { userId: number }) {
 
       {/* Analysis result */}
       {analysis && (
-        <div className="rounded-xl border border-primary/20 bg-card p-5 space-y-4">
+        <div className="rounded-xl border border-primary/20 bg-card p-5 space-y-5">
+          {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h3 className="text-sm font-bold text-foreground">Supplement Analysis</h3>
-              <p className="text-xs text-muted-foreground mt-0.5">{analysis.summary}</p>
+              <h3 className="text-sm font-bold text-foreground">Stack Analysis</h3>
+              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{analysis.summary}</p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
               <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${riskColor[analysis.overallRisk]}`}>
@@ -555,10 +561,83 @@ function SupplementsTab({ userId }: { userId: number }) {
             </div>
           </div>
 
-          {/* Per-supplement status */}
-          {analysis.items.length > 0 && (
+          {/* Timing schedule */}
+          {(analysis.timingSchedule ?? []).length > 0 && (
             <div className="space-y-2">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Supplement status</p>
+              <p className="text-xs font-semibold text-sky-400 uppercase tracking-wide">Recommended timing schedule</p>
+              {analysis.timingSchedule.map((slot, i) => (
+                <div key={i} className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
+                  <p className="text-xs font-bold text-sky-400 mb-1.5">{slot.time}</p>
+                  <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    {slot.supplements.map((s, j) => (
+                      <span key={j} className="text-[11px] font-medium bg-sky-500/10 text-sky-300 border border-sky-500/20 px-2 py-0.5 rounded-full">{s}</span>
+                    ))}
+                  </div>
+                  <p className="text-[11px] text-muted-foreground">{slot.reason}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Interactions */}
+          {(analysis.interactions ?? []).length > 0 && (() => {
+            const typeLabel: Record<string, string> = {
+              absorption_competition: "Absorption competition",
+              receptor_competition: "Receptor competition",
+              counteraction: "Counteraction",
+              synergy: "Synergy",
+              timing_conflict: "Timing conflict",
+            };
+            const typeColor: Record<string, string> = {
+              absorption_competition: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+              receptor_competition: "text-red-400 bg-red-500/10 border-red-500/20",
+              counteraction: "text-red-400 bg-red-500/10 border-red-500/20",
+              synergy: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+              timing_conflict: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+            };
+            const issues = analysis.interactions.filter(ix => ix.type !== "synergy");
+            const synergies = analysis.interactions.filter(ix => ix.type === "synergy");
+            return (
+              <>
+                {issues.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Conflicts & interactions</p>
+                    {issues.map((ix, i) => (
+                      <div key={i} className="rounded-lg border border-border/50 bg-muted/20 p-3 space-y-1.5">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border shrink-0 ${typeColor[ix.type] || "text-muted-foreground bg-muted border-border"}`}>
+                            {typeLabel[ix.type] || ix.type}
+                          </span>
+                          <span className={`text-[10px] font-bold uppercase ${ix.risk === "high" ? "text-red-400" : ix.risk === "moderate" ? "text-amber-400" : "text-muted-foreground"}`}>{ix.risk} risk</span>
+                          <p className="text-xs font-semibold text-foreground">{ix.supplements.join(" × ")}</p>
+                        </div>
+                        <p className="text-xs text-muted-foreground">{ix.reason}</p>
+                        {ix.recommendation && (
+                          <p className="text-xs text-primary font-medium">→ {ix.recommendation}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {synergies.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wide">Synergies</p>
+                    {synergies.map((ix, i) => (
+                      <div key={i} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 space-y-1">
+                        <p className="text-xs font-semibold text-foreground">{ix.supplements.join(" + ")}</p>
+                        <p className="text-xs text-muted-foreground">{ix.reason}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+
+          {/* Per-supplement dosage status */}
+          {(analysis.items ?? []).length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Dosage vs protocol</p>
               {analysis.items.map((item, i) => (
                 <div key={i} className="flex items-start gap-3 rounded-lg border border-border/50 bg-muted/20 p-3">
                   <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border shrink-0 mt-0.5 ${statusStyle[item.status] || "text-muted-foreground bg-muted border-border"}`}>
@@ -567,7 +646,7 @@ function SupplementsTab({ userId }: { userId: number }) {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-foreground">{item.name}</p>
                     <div className="flex flex-wrap gap-3 mt-0.5">
-                      {item.currentDose && <span className="text-xs text-muted-foreground">Taking: <span className="text-foreground font-medium">{item.currentDose}</span></span>}
+                      {item.currentDose && <span className="text-xs text-muted-foreground">Taking: <span className="text-foreground font-bold">{item.currentDose}</span></span>}
                       {item.recommendedDose && <span className="text-xs text-muted-foreground">Protocol: <span className="text-primary font-medium">{item.recommendedDose}</span></span>}
                     </div>
                     {item.note && <p className="text-xs text-muted-foreground mt-1">{item.note}</p>}
@@ -577,8 +656,8 @@ function SupplementsTab({ userId }: { userId: number }) {
             </div>
           )}
 
-          {/* Missing supplements */}
-          {analysis.missingFromStack.length > 0 && (
+          {/* Missing from stack */}
+          {(analysis.missingFromStack ?? []).length > 0 && (
             <div className="space-y-2">
               <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Missing from your stack</p>
               <div className="flex flex-wrap gap-2">
@@ -589,18 +668,12 @@ function SupplementsTab({ userId }: { userId: number }) {
             </div>
           )}
 
-          {/* Interactions */}
-          {analysis.interactions.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-semibold text-red-400 uppercase tracking-wide">Interactions</p>
-              {analysis.interactions.map((ix, i) => (
-                <div key={i} className="flex items-start gap-2 bg-red-500/8 border border-red-500/20 rounded-lg p-2.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
-                  <div>
-                    <p className="text-xs font-medium text-foreground">{ix.supplements.join(" × ")} <span className={`ml-1 text-[10px] uppercase font-bold ${ix.risk === "high" ? "text-red-400" : ix.risk === "moderate" ? "text-amber-400" : "text-muted-foreground"}`}>{ix.risk}</span></p>
-                    <p className="text-xs text-muted-foreground">{ix.reason}</p>
-                  </div>
-                </div>
+          {/* Stack optimisation tips */}
+          {(analysis.stackOptimisation ?? []).length > 0 && (
+            <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-1.5">
+              <p className="text-xs font-semibold text-primary uppercase tracking-wide">Stack optimisation</p>
+              {analysis.stackOptimisation.map((tip, i) => (
+                <p key={i} className="text-xs text-foreground/80">→ {tip}</p>
               ))}
             </div>
           )}
