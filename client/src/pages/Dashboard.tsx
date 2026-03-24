@@ -548,29 +548,53 @@ function SupplementsTab({ userId }: { userId: number }) {
         </div>
       )}
 
-      {/* Dosage summary — always visible when supplements exist */}
-      {(supplements ?? []).length > 0 && (
-        <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
-          <div className="px-4 py-2.5 border-b border-border/50 flex items-center justify-between">
-            <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Daily dosage summary</p>
-            <p className="text-[10px] text-muted-foreground">{(supplements ?? []).length} supplement{(supplements ?? []).length !== 1 ? "s" : ""}</p>
+      {/* Dosage summary — grouped by name, totals shown */}
+      {(supplements ?? []).length > 0 && (() => {
+        const grouped: Record<string, { entries: UserSupplement[]; total: number; unit: string }> = {};
+        for (const s of (supplements ?? [])) {
+          if (!grouped[s.name]) grouped[s.name] = { entries: [], total: 0, unit: s.unit };
+          grouped[s.name].entries.push(s);
+          grouped[s.name].total += parseFloat(s.dose) || 0;
+        }
+        return (
+          <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
+            <div className="px-4 py-2.5 border-b border-border/50 flex items-center justify-between">
+              <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Daily dosage summary</p>
+              <p className="text-[10px] text-muted-foreground">{Object.keys(grouped).length} supplement{Object.keys(grouped).length !== 1 ? "s" : ""}</p>
+            </div>
+            <div className="divide-y divide-border/40">
+              {Object.entries(grouped).map(([name, g]) => {
+                const isSplit = g.entries.length > 1;
+                return (
+                  <div key={name} className="flex items-start gap-3 px-4 py-2.5">
+                    <div className="w-20 shrink-0 text-right pt-0.5">
+                      <span className="text-sm font-bold text-foreground">{g.total}</span>
+                      <span className="text-[10px] font-semibold text-violet-400 ml-1">{g.unit}</span>
+                      {isSplit && <div className="text-[9px] text-muted-foreground">total/day</div>}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-semibold text-foreground">{name}</p>
+                      {isSplit ? (
+                        <div className="mt-0.5 space-y-0.5">
+                          {g.entries.map(e => (
+                            <p key={e.id} className="text-[10px] text-muted-foreground">
+                              {e.dose} {e.unit} · {e.notes?.split('—')[0]?.trim() || e.frequency}
+                            </p>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          {g.entries[0].frequency}{g.entries[0].notes ? ` · ${g.entries[0].notes}` : ""}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-          <div className="divide-y divide-border/40">
-            {(supplements ?? []).map(s => (
-              <div key={s.id} className="flex items-center gap-3 px-4 py-2.5">
-                <div className="w-16 shrink-0 text-right">
-                  <span className="text-sm font-bold text-foreground">{s.dose}</span>
-                  <span className="text-[10px] font-semibold text-violet-400 ml-1">{s.unit}</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-medium text-foreground truncate">{s.name}</p>
-                  <p className="text-[10px] text-muted-foreground truncate">{s.frequency}{s.notes ? ` · ${s.notes}` : ""}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Supplement list */}
       {(supplements ?? []).length === 0 && addMode === "idle" ? (
@@ -637,7 +661,7 @@ function SupplementsTab({ userId }: { userId: number }) {
                 <div key={i} className="rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
                   <p className="text-xs font-bold text-sky-400 mb-1.5">{slot.time}</p>
                   <div className="flex flex-wrap gap-1.5 mb-1.5">
-                    {slot.supplements.map((s, j) => (
+                    {(Array.isArray(slot.supplements) ? slot.supplements : [slot.supplements]).map((s, j) => (
                       <span key={j} className="text-[11px] font-medium bg-sky-500/10 text-sky-300 border border-sky-500/20 px-2 py-0.5 rounded-full">{s}</span>
                     ))}
                   </div>
@@ -677,7 +701,7 @@ function SupplementsTab({ userId }: { userId: number }) {
                             {typeLabel[ix.type] || ix.type}
                           </span>
                           <span className={`text-[10px] font-bold uppercase ${ix.risk === "high" ? "text-red-400" : ix.risk === "moderate" ? "text-amber-400" : "text-muted-foreground"}`}>{ix.risk} risk</span>
-                          <p className="text-xs font-semibold text-foreground">{ix.supplements.join(" × ")}</p>
+                          <p className="text-xs font-semibold text-foreground">{(Array.isArray(ix.supplements) ? ix.supplements : [ix.supplements]).join(" × ")}</p>
                         </div>
                         <p className="text-xs text-muted-foreground">{ix.reason}</p>
                         {ix.recommendation && (
@@ -692,7 +716,7 @@ function SupplementsTab({ userId }: { userId: number }) {
                     <p className="text-xs font-semibold text-emerald-400 uppercase tracking-wide">Synergies</p>
                     {synergies.map((ix, i) => (
                       <div key={i} className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3 space-y-1">
-                        <p className="text-xs font-semibold text-foreground">{ix.supplements.join(" + ")}</p>
+                        <p className="text-xs font-semibold text-foreground">{(Array.isArray(ix.supplements) ? ix.supplements : [ix.supplements]).join(" + ")}</p>
                         <p className="text-xs text-muted-foreground">{ix.reason}</p>
                       </div>
                     ))}
