@@ -253,6 +253,50 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── Supplement lookup — fetch evidence-based dosage from Perplexity ──────────────
+  app.post("/api/supplements/lookup", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const { name } = req.body as { name: string };
+      if (!name?.trim()) return res.status(400).json({ error: "name is required" });
+
+      const apiKey = process.env.PERPLEXITY_API_KEY;
+      if (!apiKey) return res.status(500).json({ error: "AI not configured" });
+
+      const prompt = `You are a clinical nutritionist. Look up evidence-based information about the supplement: "${name.trim()}"
+
+RESPOND ONLY WITH VALID JSON. No markdown, no explanation. Start with { and end with }.
+
+Return this exact structure:
+{
+  "name": "full correct name of the supplement (e.g. Vitamin D3 (Cholecalciferol))",
+  "commonDose": "most common supplemental dose as a number (e.g. 2000)",
+  "unit": "unit — must be one of: mg, mcg, IU, g, ml, mmol, capsule, tablet",
+  "frequency": "one of: daily, twice daily, three times daily, every other day, weekly",
+  "typicalRange": "typical safe supplemental range for healthy adults (e.g. 1000-5000 IU/day)",
+  "upperLimit": "tolerable upper intake level if known (e.g. 4000 IU/day)",
+  "bestTiming": "when to take it for best absorption (1 sentence)",
+  "notes": "1-2 sentence plain-English note about this supplement and what it does",
+  "warnings": "key safety consideration or empty string"
+}`;
+
+      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 600,
+        }),
+      });
+      const aiData = await aiRes.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try { const match = raw.match(/\{[\s\S]*\}/); parsed = JSON.parse(match ? match[0] : raw); }
+      catch { return res.status(500).json({ error: "Could not parse supplement data. Try a different name." }); }
+      res.json(parsed);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ── User Supplements CRUD ─────────────────────────────────────────────────
   app.get("/api/supplements", requireAuth, async (req: AuthRequest, res: Response) => {
     try { res.json(await storage.getUserSupplements(req.userId!)); }

@@ -277,10 +277,20 @@ const statusLabel: Record<string, string> = {
   not_in_protocol: "Not in protocol", not_taking: "Not taking",
 };
 
+interface LookupResult { name: string; commonDose: string; unit: string; frequency: string;
+  typicalRange: string; upperLimit: string; bestTiming: string; notes: string; warnings: string; }
+
 function SupplementsTab({ userId }: { userId: number }) {
   const { toast } = useToast();
-  const [showForm, setShowForm] = useState(false);
+  // "idle" → user clicks Add → "searching" (shows search box)
+  // → lookup returns result → "confirm" (shows pre-filled card to review & tweak)
+  // → save → "idle"
+  type AddMode = "idle" | "searching" | "looking" | "confirm";
+  const [addMode, setAddMode] = useState<AddMode>("idle");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [lookupResult, setLookupResult] = useState<LookupResult | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
+  // form used both for "confirm" (new) and "edit" (existing)
   const [form, setForm] = useState({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" });
   const [analysis, setAnalysis] = useState<SupplementAnalysis | null>(null);
   const [analysing, setAnalysing] = useState(false);
@@ -292,13 +302,16 @@ function SupplementsTab({ userId }: { userId: number }) {
 
   const addM = useMutation({
     mutationFn: (data: any) => apiRequest("POST", "/api/supplements", data),
-    onSuccess: () => { refetch(); setShowForm(false); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); toast({ title: "Supplement added" }); },
+    onSuccess: () => {
+      refetch(); resetAdd();
+      toast({ title: "Supplement added" });
+    },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
   const editM = useMutation({
     mutationFn: ({ id, data }: { id: number; data: any }) => apiRequest("PATCH", `/api/supplements/${id}`, data),
-    onSuccess: () => { refetch(); setEditId(null); setShowForm(false); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); toast({ title: "Updated" }); },
+    onSuccess: () => { refetch(); setEditId(null); setAddMode("idle"); toast({ title: "Updated" }); },
     onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
   });
 
@@ -307,13 +320,40 @@ function SupplementsTab({ userId }: { userId: number }) {
     onSuccess: () => { refetch(); setAnalysis(null); toast({ title: "Removed" }); },
   });
 
+  function resetAdd() {
+    setAddMode("idle"); setSearchQuery(""); setLookupResult(null); setEditId(null);
+    setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" });
+  }
+
+  async function doLookup() {
+    if (!searchQuery.trim()) return;
+    setAddMode("looking");
+    try {
+      const data: LookupResult = await apiRequest("POST", "/api/supplements/lookup", { name: searchQuery.trim() });
+      if (data.error) throw new Error((data as any).error);
+      setLookupResult(data);
+      setForm({
+        name: data.name || searchQuery.trim(),
+        dose: data.commonDose || "",
+        unit: data.unit || "mg",
+        frequency: data.frequency || "daily",
+        notes: data.bestTiming || "",
+      });
+      setAddMode("confirm");
+    } catch (e: any) {
+      toast({ title: "Lookup failed", description: e.message, variant: "destructive" });
+      setAddMode("searching");
+    }
+  }
+
   function startEdit(s: UserSupplement) {
     setEditId(s.id);
     setForm({ name: s.name, dose: s.dose, unit: s.unit, frequency: s.frequency, notes: s.notes || "" });
-    setShowForm(true);
+    setLookupResult(null);
+    setAddMode("confirm");
   }
 
-  function handleSubmit() {
+  function handleSave() {
     if (!form.name.trim() || !form.dose.trim()) return;
     if (editId) { editM.mutate({ id: editId, data: form }); }
     else { addM.mutate({ ...form, userId }); }
@@ -332,6 +372,8 @@ function SupplementsTab({ userId }: { userId: number }) {
     moderate: "text-amber-400 bg-amber-500/10 border-amber-500/20",
     high: "text-red-400 bg-red-500/10 border-red-500/20" };
 
+  const isSaving = addM.isPending || editM.isPending;
+
   return (
     <div className="space-y-4">
       {/* Header row */}
@@ -346,68 +388,116 @@ function SupplementsTab({ userId }: { userId: number }) {
             {analysing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldAlert className="w-3.5 h-3.5" />}
             {analysing ? "Analysing…" : "Analyse vs protocols"}
           </Button>
-          <Button size="sm" className="gap-1.5" onClick={() => { setShowForm(true); setEditId(null); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); }}>
-            <Plus className="w-3.5 h-3.5" /> Add supplement
-          </Button>
+          {addMode === "idle" && (
+            <Button size="sm" className="gap-1.5" onClick={() => setAddMode("searching")}>
+              <Plus className="w-3.5 h-3.5" /> Add supplement
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Add/edit form */}
-      {showForm && (
+      {/* Step 1: Search */}
+      {addMode === "searching" && (
         <div className="rounded-xl border border-primary/20 bg-card p-4 space-y-3">
-          <p className="text-sm font-semibold text-foreground">{editId ? "Edit supplement" : "Add supplement"}</p>
+          <p className="text-sm font-semibold text-foreground">Search supplement</p>
+          <p className="text-xs text-muted-foreground">Type a supplement name and we’ll look up the standard dosage, timing, and safety info for you.</p>
+          <div className="flex gap-2">
+            <input
+              autoFocus
+              className="flex-1 rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+              placeholder="e.g. Vitamin D3, Magnesium Glycinate, Zinc…"
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+              onKeyDown={e => e.key === "Enter" && doLookup()}
+            />
+            <Button size="sm" className="gap-1.5 shrink-0" onClick={doLookup} disabled={!searchQuery.trim()}>
+              Search
+            </Button>
+            <Button size="sm" variant="ghost" onClick={resetAdd}><X className="w-4 h-4" /></Button>
+          </div>
+        </div>
+      )}
+
+      {/* Step 1.5: Loading */}
+      {addMode === "looking" && (
+        <div className="rounded-xl border border-primary/20 bg-card p-6 flex items-center gap-3">
+          <Loader2 className="w-5 h-5 animate-spin text-primary shrink-0" />
+          <div>
+            <p className="text-sm font-semibold text-foreground">Looking up “{searchQuery}”…</p>
+            <p className="text-xs text-muted-foreground mt-0.5">Fetching evidence-based dosage information.</p>
+          </div>
+        </div>
+      )}
+
+      {/* Step 2: Review + confirm (also used for edit) */}
+      {addMode === "confirm" && (
+        <div className="rounded-xl border border-primary/20 bg-card p-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm font-semibold text-foreground">{editId ? "Edit supplement" : "Review & confirm"}</p>
+            <button onClick={resetAdd} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+          </div>
+
+          {/* Lookup info card (new only) */}
+          {lookupResult && !editId && (
+            <div className="rounded-lg bg-muted/30 border border-border/50 p-3 space-y-1.5 text-xs">
+              {lookupResult.notes && <p className="text-foreground/80">{lookupResult.notes}</p>}
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-muted-foreground">
+                {lookupResult.typicalRange && <span>Range: <span className="text-foreground font-medium">{lookupResult.typicalRange}</span></span>}
+                {lookupResult.upperLimit && <span>Upper limit: <span className="text-foreground font-medium">{lookupResult.upperLimit}</span></span>}
+              </div>
+              {lookupResult.warnings && (
+                <div className="flex items-start gap-1.5 bg-amber-500/10 rounded-lg p-2 border border-amber-500/20 mt-1">
+                  <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
+                  <span className="text-amber-300">{lookupResult.warnings}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Editable fields — pre-filled from lookup */}
           <div className="grid grid-cols-2 gap-2">
             <div className="col-span-2">
               <label className="text-xs text-muted-foreground mb-1 block">Name</label>
-              <input
-                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
-                placeholder="e.g. Vitamin D3"
-                value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
-              />
+              <input className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Dose</label>
-              <input
-                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
-                placeholder="e.g. 5000"
-                value={form.dose} onChange={e => setForm(f => ({ ...f, dose: e.target.value }))}
-              />
+              <input className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.dose} onChange={e => setForm(f => ({ ...f, dose: e.target.value }))} />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Unit</label>
-              <select
-                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
-                value={form.unit} onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
-              >
+              <select className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.unit} onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}>
                 {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
               </select>
             </div>
             <div className="col-span-2">
               <label className="text-xs text-muted-foreground mb-1 block">Frequency</label>
-              <select
-                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
-                value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))}
-              >
+              <select className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))}>
                 {FREQUENCIES.map(fr => <option key={fr} value={fr}>{fr}</option>)}
               </select>
             </div>
             <div className="col-span-2">
-              <label className="text-xs text-muted-foreground mb-1 block">Notes <span className="opacity-60">(optional — brand, form, timing)</span></label>
-              <input
-                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+              <label className="text-xs text-muted-foreground mb-1 block">Notes <span className="opacity-60">(timing, brand, form)</span></label>
+              <input className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
                 placeholder="e.g. softgel, with fat, morning"
-                value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
-              />
+                value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
             </div>
           </div>
           <div className="flex gap-2">
-            <Button size="sm" className="gap-1.5" onClick={handleSubmit}
-              disabled={!form.name.trim() || !form.dose.trim() || addM.isPending || editM.isPending}>
-              <Check className="w-3.5 h-3.5" /> {editId ? "Save changes" : "Add"}
+            <Button size="sm" className="gap-1.5" onClick={handleSave}
+              disabled={!form.name.trim() || !form.dose.trim() || isSaving}>
+              {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+              {editId ? "Save changes" : "Add to my stack"}
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => { setShowForm(false); setEditId(null); }}>
-              <X className="w-3.5 h-3.5" /> Cancel
-            </Button>
+            {!editId && (
+              <Button size="sm" variant="ghost" className="gap-1.5" onClick={() => setAddMode("searching")}>
+                ← Search again
+              </Button>
+            )}
           </div>
         </div>
       )}
