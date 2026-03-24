@@ -385,14 +385,24 @@ Return:
       const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 3000 }),
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 4000 }),
       });
       const aiData = await aiRes.json() as any;
       const raw = aiData.choices?.[0]?.message?.content || "{}";
       let parsed: any;
       try {
         const match = raw.match(/\{[\s\S]*/);
-        parsed = JSON.parse(match ? match[0] : raw);
+        if (!match) throw new Error("no json");
+        let candidate = match[0];
+        try { parsed = JSON.parse(candidate); }
+        catch {
+          // Repair truncated JSON
+          const opens = (candidate.match(/[\[{]/g) || []).length;
+          const closes = (candidate.match(/[\]\}]/g) || []).length;
+          let repair = candidate.trimEnd().replace(/,\s*$/, "");
+          for (let i = 0; i < opens - closes; i++) repair += repair.lastIndexOf('[') > repair.lastIndexOf('{') ? ']' : '}';
+          parsed = JSON.parse(repair);
+        }
       } catch { return res.status(500).json({ error: "Could not parse nutrient data. Try again." }); }
       res.json(parsed);
     } catch (e: any) { res.status(500).json({ error: e.message }); }
