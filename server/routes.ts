@@ -289,7 +289,7 @@ CRITICAL: If this is an AM/PM, morning/evening, or split-dose product, set hasSp
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "sonar",
+          model: "sonar-pro",
           messages: [{ role: "user", content: prompt }],
           max_tokens: 800,
         }),
@@ -395,7 +395,7 @@ Return:
       const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "sonar", messages: [{ role: "user", content: prompt }], max_tokens: 3000 }),
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 3000 }),
       });
       const aiData = await aiRes.json() as any;
       const raw = aiData.choices?.[0]?.message?.content || "{}";
@@ -475,7 +475,7 @@ Return this JSON structure:
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "sonar",
+          model: "sonar-pro",
           messages: [{ role: "user", content: prompt }],
           max_tokens: 2000,
         }),
