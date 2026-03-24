@@ -253,6 +253,73 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── AI Cross-reference analysis across all active protocols ───────────────
+  app.post("/api/protocols/cross-reference", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const allUserProtocols = await storage.getUserProtocols(req.userId!);
+      const active = allUserProtocols.filter(up => up.status === "active" && up.protocol);
+      if (active.length === 0) return res.status(400).json({ error: "No active protocols to analyse." });
+
+      const apiKey = process.env.PERPLEXITY_API_KEY;
+      if (!apiKey) return res.status(500).json({ error: "AI not configured. Set PERPLEXITY_API_KEY in Railway." });
+
+      const protocolSummaries = active.map(up => {
+        const p = up.protocol!;
+        return `Protocol: ${p.name}
+Category: ${p.category}
+Dosage: ${p.dosage || "not specified"}
+Steps: ${(p.steps as string[] | null)?.join("; ") || "none"}
+Duration: ${p.duration || "unspecified"}
+Conflicts with: ${(p.conflictsWith as string[] | null)?.join(", ") || "none listed"}
+Contraindications: ${p.contraindications || "none"}`;
+      }).join("\n\n---\n\n");
+
+      const prompt = `You are a clinical pharmacist and nutritionist. Analyse the following ${active.length} active health protocols for a single patient.
+
+RESPOND ONLY WITH VALID JSON. No markdown, no explanation. Start with { and end with }.
+
+PROTOCOLS:
+${protocolSummaries}
+
+Return this JSON structure:
+{
+  "summary": "2-3 sentence plain-English overview of the combined protocol stack",
+  "overallRisk": "low|moderate|high",
+  "conflicts": [
+    { "protocolA": "name", "protocolB": "name", "reason": "plain-English explanation" }
+  ],
+  "dosageTotals": [
+    { "supplement": "name", "totalDose": "combined dose across protocols", "safetyNote": "brief safety note or empty string" }
+  ],
+  "sequenceRecommendations": [
+    "Recommendation 1 about timing or order"
+  ]
+}`;
+
+      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{ role: "user", content: prompt }],
+          max_tokens: 2000,
+        }),
+      });
+
+      const aiData = await aiRes.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try {
+        const match = raw.match(/\{[\s\S]*\}/);
+        parsed = JSON.parse(match ? match[0] : raw);
+      } catch {
+        return res.status(500).json({ error: "AI returned invalid JSON. Please try again." });
+      }
+
+      res.json(parsed);
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
   // ── Daily nudge cron (runs every hour, generates nudges for users who missed checkin) ─
   setInterval(() => storage.generateDailyNudges().catch(console.error), 60 * 60 * 1000);
 }
