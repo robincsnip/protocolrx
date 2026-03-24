@@ -266,22 +266,26 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
 RESPOND ONLY WITH VALID JSON. No markdown. Start with { and end with }.
 
-CRITICAL: If this is an AM/PM, morning/evening, or split-dose product, set hasSplitDose=true and populate splitSchedule with EACH component separately. Never collapse a 3+3 capsule product into "3 capsules daily".
+CRITICAL RULE on hasSplitDose:
+- Set hasSplitDose=TRUE ONLY if this product has TWO PHYSICALLY DIFFERENT FORMULAS sold together (e.g. Thorne Multi-Vitamin Elite AM/PM has a distinct AM capsule blend and a distinct PM capsule blend).
+- Set hasSplitDose=FALSE if it is simply ONE formula taken twice daily, split into morning and evening doses (e.g. magnesium taken 200mg morning + 200mg evening = 400mg/day is NOT split-dose).
+- For true split-dose products, set commonDose=null and populate splitSchedule.
+- For all others, set commonDose to the total daily amount as a number.
 
 {
   "name": "exact product name",
   "hasSplitDose": false,
-  "commonDose": "total daily dose as a number if single formula, or null if split-dose",
+  "commonDose": "total daily dose as a number, or null only for true AM/PM dual-formula products",
   "unit": "one of: mg mcg IU g ml mmol capsule tablet",
   "frequency": "one of: daily twice daily three times daily every other day weekly",
   "splitSchedule": [
-    { "time": "e.g. Morning with breakfast", "dose": "3", "unit": "capsule", "notes": "AM formula" },
-    { "time": "e.g. Evening with dinner", "dose": "3", "unit": "capsule", "notes": "PM formula" }
+    { "time": "Morning with breakfast", "dose": "3", "unit": "capsule", "notes": "AM formula" },
+    { "time": "Evening with dinner", "dose": "3", "unit": "capsule", "notes": "PM formula" }
   ],
   "typicalRange": "safe supplemental range (e.g. 1000-5000 IU/day)",
   "upperLimit": "tolerable upper intake level or empty string",
-  "bestTiming": "when to take it (1 sentence)",
-  "notes": "1-2 sentence plain-English description",
+  "bestTiming": "when to take it for best absorption (1 sentence)",
+  "notes": "1-2 sentence plain-English description of what it does",
   "warnings": "key safety note or empty string"
 }`;
 

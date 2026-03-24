@@ -548,8 +548,8 @@ function SupplementsTab({ userId }: { userId: number }) {
         </div>
       )}
 
-      {/* Dosage summary */}
-      {(supplements ?? []).length > 0 && addMode === "idle" && (
+      {/* Dosage summary — always visible when supplements exist */}
+      {(supplements ?? []).length > 0 && (
         <div className="rounded-xl border border-border/60 bg-card overflow-hidden">
           <div className="px-4 py-2.5 border-b border-border/50 flex items-center justify-between">
             <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Daily dosage summary</p>
