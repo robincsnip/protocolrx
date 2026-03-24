@@ -503,7 +503,7 @@ function SupplementsTab({ userId }: { userId: number }) {
       )}
 
       {/* Supplement list */}
-      {(supplements ?? []).length === 0 && !showForm ? (
+      {(supplements ?? []).length === 0 && addMode === "idle" ? (
         <div className="rounded-xl border border-dashed border-border/60 p-10 text-center">
           <Pill className="w-9 h-9 text-muted-foreground/40 mx-auto mb-3" />
           <p className="text-sm font-medium text-muted-foreground">No supplements logged yet</p>
