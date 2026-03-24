@@ -7,13 +7,12 @@ import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/context/AuthContext";
-import { API_BASE } from "@/lib/queryClient";
 
 const DEFAULT_AXON_URL = "https://axon-production-7c23.up.railway.app";
 
 export default function Login() {
   const [, navigate] = useLocation();
-  const { login, isLoading } = useAuth();
+  const { login, loginWithAxon, isLoading } = useAuth();
   const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -22,7 +21,6 @@ export default function Login() {
   const [axonUrl, setAxonUrl] = useState(DEFAULT_AXON_URL);
   const [axonEmail, setAxonEmail] = useState("");
   const [axonPassword, setAxonPassword] = useState("");
-  const [axonLoading, setAxonLoading] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -32,22 +30,12 @@ export default function Login() {
 
   async function handleAxonLogin(e: React.FormEvent) {
     e.preventDefault();
-    setAxonLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/auth/axon`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ axonUrl, email: axonEmail, password: axonPassword }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Login with AXON failed.");
-      // Store token + user the same way as normal login
-      try { sessionStorage.setItem("prx_token", data.token); sessionStorage.setItem("prx_user", JSON.stringify(data.user)); } catch {}
+      await loginWithAxon(axonUrl, axonEmail, axonPassword);
       navigate("/");
-      window.location.reload(); // refresh to pick up new session
     } catch (err: any) {
       toast({ title: "AXON login failed", description: err.message, variant: "destructive" });
-    } finally { setAxonLoading(false); }
+    }
   }
 
   return (
@@ -119,9 +107,9 @@ export default function Login() {
                 </div>
                 <Button type="submit" className="w-full gap-2"
                   style={{ background: "#00D4AA", color: "#0A0D0F" }}
-                  disabled={axonLoading || !axonEmail || !axonPassword}>
-                  {axonLoading && <Loader2 className="w-4 h-4 animate-spin" />}
-                  {axonLoading ? "Connecting…" : "Continue with AXON"}
+                  disabled={isLoading || !axonEmail || !axonPassword}>
+                  {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
+                  {isLoading ? "Connecting…" : "Continue with AXON"}
                 </Button>
                 <button type="button" onClick={() => setShowAxon(false)}
                   className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors mt-1">
