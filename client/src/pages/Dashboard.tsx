@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { FlaskConical, CheckCircle, Clock, AlertTriangle, Bell, Plus, ChevronRight,
-  Zap, Play, Pause, XCircle, LogOut, Activity, CheckSquare, RefreshCw, Loader2,
-  ShieldAlert, Stethoscope, Timer, Eye } from "lucide-react";
+import { FlaskConical, CheckCircle, AlertTriangle, Bell, Plus, ChevronRight,
+  Zap, Play, Pause, XCircle, LogOut, Activity, Loader2,
+  ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -21,6 +21,14 @@ interface Nudge { id: number; type: string; title: string; body: string | null; 
 interface CrossRefResult { summary: string; conflicts: { protocolA: string; protocolB: string; reason: string }[];
   dosageTotals: { supplement: string; totalDose: string; safetyNote: string }[];
   sequenceRecommendations: string[]; overallRisk: "low" | "moderate" | "high"; }
+interface UserSupplement { id: number; name: string; dose: string; unit: string; frequency: string; notes: string | null; }
+interface SupplementAnalysis {
+  summary: string;
+  overallRisk: "low" | "moderate" | "high";
+  items: { name: string; currentDose: string | null; recommendedDose: string | null; status: string; note: string }[];
+  interactions: { supplements: string[]; risk: string; reason: string }[];
+  missingFromStack: string[];
+}
 
 // ─── Category colours ─────────────────────────────────────────────────────────
 const catColor: Record<string, string> = {
@@ -254,6 +262,264 @@ function ActiveProtocolCard({ up, onCheckin, onPause, onResume, onComplete }: {
   );
 }
 
+// ─── Supplements tab ──────────────────────────────────────────────────────────────
+const UNITS = ["mg", "mcg", "IU", "g", "ml", "mmol", "capsule", "tablet"];
+const FREQUENCIES = ["daily", "twice daily", "three times daily", "every other day", "weekly"];
+const statusStyle: Record<string, string> = {
+  sufficient:       "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+  insufficient:     "text-amber-400 bg-amber-500/10 border-amber-500/20",
+  excess:           "text-red-400 bg-red-500/10 border-red-500/20",
+  not_in_protocol:  "text-sky-400 bg-sky-500/10 border-sky-500/20",
+  not_taking:       "text-muted-foreground bg-muted border-border",
+};
+const statusLabel: Record<string, string> = {
+  sufficient: "Sufficient", insufficient: "Insufficient", excess: "Excess",
+  not_in_protocol: "Not in protocol", not_taking: "Not taking",
+};
+
+function SupplementsTab({ userId }: { userId: number }) {
+  const { toast } = useToast();
+  const [showForm, setShowForm] = useState(false);
+  const [editId, setEditId] = useState<number | null>(null);
+  const [form, setForm] = useState({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" });
+  const [analysis, setAnalysis] = useState<SupplementAnalysis | null>(null);
+  const [analysing, setAnalysing] = useState(false);
+
+  const { data: supplements, refetch } = useQuery<UserSupplement[]>({
+    queryKey: ["/api/supplements"],
+    refetchOnWindowFocus: true,
+  });
+
+  const addM = useMutation({
+    mutationFn: (data: any) => apiRequest("POST", "/api/supplements", data),
+    onSuccess: () => { refetch(); setShowForm(false); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); toast({ title: "Supplement added" }); },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const editM = useMutation({
+    mutationFn: ({ id, data }: { id: number; data: any }) => apiRequest("PATCH", `/api/supplements/${id}`, data),
+    onSuccess: () => { refetch(); setEditId(null); setShowForm(false); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); toast({ title: "Updated" }); },
+    onError: (e: any) => toast({ title: "Failed", description: e.message, variant: "destructive" }),
+  });
+
+  const deleteM = useMutation({
+    mutationFn: (id: number) => apiRequest("DELETE", `/api/supplements/${id}`),
+    onSuccess: () => { refetch(); setAnalysis(null); toast({ title: "Removed" }); },
+  });
+
+  function startEdit(s: UserSupplement) {
+    setEditId(s.id);
+    setForm({ name: s.name, dose: s.dose, unit: s.unit, frequency: s.frequency, notes: s.notes || "" });
+    setShowForm(true);
+  }
+
+  function handleSubmit() {
+    if (!form.name.trim() || !form.dose.trim()) return;
+    if (editId) { editM.mutate({ id: editId, data: form }); }
+    else { addM.mutate({ ...form, userId }); }
+  }
+
+  async function runAnalysis() {
+    setAnalysing(true); setAnalysis(null);
+    try {
+      const data = await apiRequest("POST", "/api/supplements/analyse");
+      setAnalysis(data);
+    } catch (e: any) { toast({ title: "Analysis failed", description: e.message, variant: "destructive" }); }
+    finally { setAnalysing(false); }
+  }
+
+  const riskColor = { low: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
+    moderate: "text-amber-400 bg-amber-500/10 border-amber-500/20",
+    high: "text-red-400 bg-red-500/10 border-red-500/20" };
+
+  return (
+    <div className="space-y-4">
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-sm font-semibold text-foreground">My Supplements</p>
+          <p className="text-xs text-muted-foreground">{(supplements ?? []).length} supplement{(supplements ?? []).length !== 1 ? "s" : ""} logged</p>
+        </div>
+        <div className="flex gap-2">
+          <Button size="sm" variant="outline" className="gap-1.5 border-primary/30 text-primary hover:bg-primary/10"
+            onClick={runAnalysis} disabled={analysing}>
+            {analysing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldAlert className="w-3.5 h-3.5" />}
+            {analysing ? "Analysing…" : "Analyse vs protocols"}
+          </Button>
+          <Button size="sm" className="gap-1.5" onClick={() => { setShowForm(true); setEditId(null); setForm({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" }); }}>
+            <Plus className="w-3.5 h-3.5" /> Add supplement
+          </Button>
+        </div>
+      </div>
+
+      {/* Add/edit form */}
+      {showForm && (
+        <div className="rounded-xl border border-primary/20 bg-card p-4 space-y-3">
+          <p className="text-sm font-semibold text-foreground">{editId ? "Edit supplement" : "Add supplement"}</p>
+          <div className="grid grid-cols-2 gap-2">
+            <div className="col-span-2">
+              <label className="text-xs text-muted-foreground mb-1 block">Name</label>
+              <input
+                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                placeholder="e.g. Vitamin D3"
+                value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Dose</label>
+              <input
+                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                placeholder="e.g. 5000"
+                value={form.dose} onChange={e => setForm(f => ({ ...f, dose: e.target.value }))}
+              />
+            </div>
+            <div>
+              <label className="text-xs text-muted-foreground mb-1 block">Unit</label>
+              <select
+                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.unit} onChange={e => setForm(f => ({ ...f, unit: e.target.value }))}
+              >
+                {UNITS.map(u => <option key={u} value={u}>{u}</option>)}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="text-xs text-muted-foreground mb-1 block">Frequency</label>
+              <select
+                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                value={form.frequency} onChange={e => setForm(f => ({ ...f, frequency: e.target.value }))}
+              >
+                {FREQUENCIES.map(fr => <option key={fr} value={fr}>{fr}</option>)}
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className="text-xs text-muted-foreground mb-1 block">Notes <span className="opacity-60">(optional — brand, form, timing)</span></label>
+              <input
+                className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
+                placeholder="e.g. softgel, with fat, morning"
+                value={form.notes} onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+              />
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <Button size="sm" className="gap-1.5" onClick={handleSubmit}
+              disabled={!form.name.trim() || !form.dose.trim() || addM.isPending || editM.isPending}>
+              <Check className="w-3.5 h-3.5" /> {editId ? "Save changes" : "Add"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => { setShowForm(false); setEditId(null); }}>
+              <X className="w-3.5 h-3.5" /> Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* Supplement list */}
+      {(supplements ?? []).length === 0 && !showForm ? (
+        <div className="rounded-xl border border-dashed border-border/60 p-10 text-center">
+          <Pill className="w-9 h-9 text-muted-foreground/40 mx-auto mb-3" />
+          <p className="text-sm font-medium text-muted-foreground">No supplements logged yet</p>
+          <p className="text-xs text-muted-foreground mt-1">Add the supplements you are currently taking to check them against your active protocols.</p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {(supplements ?? []).map(s => (
+            <div key={s.id} className="flex items-center gap-3 rounded-xl border border-border/60 bg-card px-4 py-3">
+              <div className="w-8 h-8 rounded-lg bg-violet-500/10 flex items-center justify-center shrink-0">
+                <Pill className="w-4 h-4 text-violet-400" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-foreground">{s.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {s.dose} {s.unit} · {s.frequency}{s.notes ? ` · ${s.notes}` : ""}
+                </p>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button onClick={() => startEdit(s)}
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button onClick={() => deleteM.mutate(s.id)}
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Analysis result */}
+      {analysis && (
+        <div className="rounded-xl border border-primary/20 bg-card p-5 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-foreground">Supplement Analysis</h3>
+              <p className="text-xs text-muted-foreground mt-0.5">{analysis.summary}</p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${riskColor[analysis.overallRisk]}`}>
+                {analysis.overallRisk} risk
+              </span>
+              <button onClick={() => setAnalysis(null)} className="text-muted-foreground hover:text-foreground">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* Per-supplement status */}
+          {analysis.items.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Supplement status</p>
+              {analysis.items.map((item, i) => (
+                <div key={i} className="flex items-start gap-3 rounded-lg border border-border/50 bg-muted/20 p-3">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border shrink-0 mt-0.5 ${statusStyle[item.status] || "text-muted-foreground bg-muted border-border"}`}>
+                    {statusLabel[item.status] || item.status}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-foreground">{item.name}</p>
+                    <div className="flex flex-wrap gap-3 mt-0.5">
+                      {item.currentDose && <span className="text-xs text-muted-foreground">Taking: <span className="text-foreground font-medium">{item.currentDose}</span></span>}
+                      {item.recommendedDose && <span className="text-xs text-muted-foreground">Protocol: <span className="text-primary font-medium">{item.recommendedDose}</span></span>}
+                    </div>
+                    {item.note && <p className="text-xs text-muted-foreground mt-1">{item.note}</p>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Missing supplements */}
+          {analysis.missingFromStack.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Missing from your stack</p>
+              <div className="flex flex-wrap gap-2">
+                {analysis.missingFromStack.map((s, i) => (
+                  <span key={i} className="text-xs font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 rounded-lg">{s}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Interactions */}
+          {analysis.interactions.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-xs font-semibold text-red-400 uppercase tracking-wide">Interactions</p>
+              {analysis.interactions.map((ix, i) => (
+                <div key={i} className="flex items-start gap-2 bg-red-500/8 border border-red-500/20 rounded-lg p-2.5">
+                  <AlertTriangle className="w-3.5 h-3.5 text-red-400 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-medium text-foreground">{ix.supplements.join(" × ")} <span className={`ml-1 text-[10px] uppercase font-bold ${ix.risk === "high" ? "text-red-400" : ix.risk === "moderate" ? "text-amber-400" : "text-muted-foreground"}`}>{ix.risk}</span></p>
+                    <p className="text-xs text-muted-foreground">{ix.reason}</p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Cross-reference result panel ────────────────────────────────────────────
 function CrossRefPanel({ result }: { result: CrossRefResult }) {
   const riskColor = { low: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
@@ -320,7 +586,7 @@ function CrossRefPanel({ result }: { result: CrossRefResult }) {
 export default function Dashboard() {
   const { user, logout } = useAuth();
   const { toast } = useToast();
-  const [tab, setTab] = useState<"active" | "library" | "nudges">("active");
+  const [tab, setTab] = useState<"active" | "library" | "nudges" | "supplements">("active");
   const [crossRef, setCrossRef] = useState<CrossRefResult | null>(null);
   const [crossRefLoading, setCrossRefLoading] = useState(false);
 
@@ -471,6 +737,9 @@ export default function Dashboard() {
           <button className={tabClass("nudges")} onClick={() => setTab("nudges")}>
             Nudges {unreadNudges.length > 0 && <span className="ml-1.5 text-xs bg-primary/20 text-primary px-1.5 py-0.5 rounded-full">{unreadNudges.length}</span>}
           </button>
+          <button className={tabClass("supplements")} onClick={() => setTab("supplements")}>
+            <span className="flex items-center gap-1.5"><Pill className="w-3.5 h-3.5" />Supplements</span>
+          </button>
         </div>
 
         {/* Tab content */}
@@ -560,6 +829,10 @@ export default function Dashboard() {
               ))
             )}
           </div>
+        )}
+
+        {tab === "supplements" && user && (
+          <SupplementsTab userId={user.id} />
         )}
       </main>
 

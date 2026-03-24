@@ -253,6 +253,111 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
+  // ── User Supplements CRUD ─────────────────────────────────────────────────
+  app.get("/api/supplements", requireAuth, async (req: AuthRequest, res: Response) => {
+    try { res.json(await storage.getUserSupplements(req.userId!)); }
+    catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.post("/api/supplements", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const { name, dose, unit, frequency, notes } = req.body;
+      if (!name || !dose || !unit) return res.status(400).json({ error: "name, dose and unit are required" });
+      const s = await storage.createUserSupplement({ userId: req.userId!, name, dose, unit, frequency: frequency || "daily", notes: notes || null });
+      res.json(s);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.patch("/api/supplements/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const supplements = await storage.getUserSupplements(req.userId!);
+      if (!supplements.find(s => s.id === id)) return res.status(403).json({ error: "Access denied" });
+      await storage.updateUserSupplement(id, req.body);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  app.delete("/api/supplements/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const supplements = await storage.getUserSupplements(req.userId!);
+      if (!supplements.find(s => s.id === id)) return res.status(403).json({ error: "Access denied" });
+      await storage.deleteUserSupplement(id);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/supplements/analyse — AI analysis: actual intake vs active protocols
+  app.post("/api/supplements/analyse", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const apiKey = process.env.PERPLEXITY_API_KEY;
+      if (!apiKey) return res.status(500).json({ error: "AI not configured. Set PERPLEXITY_API_KEY in Railway." });
+
+      const [supplements, userProtocolsList] = await Promise.all([
+        storage.getUserSupplements(req.userId!),
+        storage.getUserProtocols(req.userId!),
+      ]);
+      const activeProtocols = userProtocolsList.filter(up => up.status === "active" && up.protocol);
+
+      if (supplements.length === 0 && activeProtocols.length === 0) {
+        return res.status(400).json({ error: "Add supplements and/or activate protocols first." });
+      }
+
+      const supplementList = supplements.length > 0
+        ? supplements.map(s => `- ${s.name}: ${s.dose} ${s.unit} ${s.frequency}${s.notes ? ` (${s.notes})` : ""}`).join("\n")
+        : "(none entered)";
+
+      const protocolList = activeProtocols.length > 0
+        ? activeProtocols.map(up => {
+            const p = up.protocol!;
+            return `- ${p.name} | dosage: ${p.dosage || "unspecified"} | conflicts_with: ${(p.conflictsWith as string[] | null)?.join(", ") || "none"}`;
+          }).join("\n")
+        : "(no active protocols)";
+
+      const prompt = `You are a clinical pharmacist. Analyse this patient's current supplement intake versus their active health protocols.
+
+RESPOND ONLY WITH VALID JSON. No markdown. Start with { and end with }.
+
+CURRENT SUPPLEMENTS (what they are actually taking):
+${supplementList}
+
+ACTIVE PROTOCOLS (what their health plan recommends):
+${protocolList}
+
+Return this exact JSON:
+{
+  "summary": "2-3 sentence plain-English overview",
+  "items": [
+    {
+      "name": "supplement name",
+      "currentDose": "dose they are taking or null if not taking",
+      "recommendedDose": "dose from protocols or null if no protocol",
+      "status": "sufficient | insufficient | excess | not_in_protocol | not_taking",
+      "note": "1 sentence plain-English note about this supplement"
+    }
+  ],
+  "interactions": [
+    { "supplements": ["name1", "name2"], "risk": "low|moderate|high", "reason": "plain-English explanation" }
+  ],
+  "missingFromStack": ["supplement recommended by protocol but not being taken"],
+  "overallRisk": "low|moderate|high"
+}`;
+
+      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 2500 }),
+      });
+      const aiData = await aiRes.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try { const match = raw.match(/\{[\s\S]*\}/); parsed = JSON.parse(match ? match[0] : raw); }
+      catch { return res.status(500).json({ error: "AI returned invalid JSON. Please try again." }); }
+      res.json(parsed);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // ── AI Cross-reference analysis across all active protocols ───────────────
   app.post("/api/protocols/cross-reference", requireAuth, async (req: AuthRequest, res: Response) => {
     try {

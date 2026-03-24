@@ -99,3 +99,19 @@ export const nudges = pgTable("prx_nudges", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 export type Nudge = typeof nudges.$inferSelect;
+
+// ─── User Supplements ────────────────────────────────────────────────────────
+// What the user is currently actually taking (may overlap or differ from protocols)
+export const userSupplements = pgTable("prx_user_supplements", {
+  id: serial("id").primaryKey(),
+  userId: integer("user_id").notNull(),
+  name: text("name").notNull(),          // e.g. "Vitamin D3"
+  dose: text("dose").notNull(),          // e.g. "5000"
+  unit: text("unit").notNull(),          // e.g. "IU" | "mg" | "mcg" | "g"
+  frequency: text("frequency").notNull().default("daily"), // e.g. "daily" | "twice daily" | "weekly"
+  notes: text("notes"),                  // optional: brand, timing, form
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+export const insertSupplementSchema = createInsertSchema(userSupplements).omit({ id: true, createdAt: true });
+export type InsertSupplement = z.infer<typeof insertSupplementSchema>;
+export type UserSupplement = typeof userSupplements.$inferSelect;

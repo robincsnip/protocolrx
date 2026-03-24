@@ -1,5 +1,5 @@
 import { Pool } from "pg";
-import type { User, Protocol, UserProtocol, Checkin, Nudge } from "@shared/schema";
+import type { User, Protocol, UserProtocol, Checkin, Nudge, UserSupplement, InsertSupplement } from "@shared/schema";
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -73,6 +73,17 @@ async function initSchema() {
       scheduled_for TIMESTAMPTZ,
       sent_at TIMESTAMPTZ,
       read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS prx_user_supplements (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      dose TEXT NOT NULL,
+      unit TEXT NOT NULL DEFAULT 'mg',
+      frequency TEXT NOT NULL DEFAULT 'daily',
+      notes TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
@@ -335,5 +346,49 @@ export const storage = {
       });
     }
     console.log(`[prx] Generated ${rows.length} daily nudges`);
+  },
+
+  // ── User Supplements ─────────────────────────────────────────────────────
+  async getUserSupplements(userId: number): Promise<UserSupplement[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM prx_user_supplements WHERE user_id = $1 ORDER BY name ASC`,
+      [userId]
+    );
+    return rows.map(r => ({
+      id: r.id, userId: r.user_id, name: r.name, dose: r.dose,
+      unit: r.unit, frequency: r.frequency, notes: r.notes ?? null,
+      createdAt: r.created_at,
+    }) as UserSupplement);
+  },
+
+  async createUserSupplement(data: InsertSupplement): Promise<UserSupplement> {
+    const { rows } = await pool.query(
+      `INSERT INTO prx_user_supplements (user_id, name, dose, unit, frequency, notes)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [data.userId, data.name.trim(), data.dose.trim(), data.unit.trim(),
+       data.frequency || "daily", data.notes ?? null]
+    );
+    const r = rows[0];
+    return { id: r.id, userId: r.user_id, name: r.name, dose: r.dose,
+      unit: r.unit, frequency: r.frequency, notes: r.notes ?? null,
+      createdAt: r.created_at } as UserSupplement;
+  },
+
+  async updateUserSupplement(id: number, data: Partial<InsertSupplement>): Promise<void> {
+    const fields: string[] = [];
+    const vals: any[] = [];
+    let i = 1;
+    if (data.name !== undefined)      { fields.push(`name=$${i++}`);      vals.push(data.name.trim()); }
+    if (data.dose !== undefined)      { fields.push(`dose=$${i++}`);      vals.push(data.dose.trim()); }
+    if (data.unit !== undefined)      { fields.push(`unit=$${i++}`);      vals.push(data.unit.trim()); }
+    if (data.frequency !== undefined) { fields.push(`frequency=$${i++}`); vals.push(data.frequency); }
+    if (data.notes !== undefined)     { fields.push(`notes=$${i++}`);     vals.push(data.notes); }
+    if (!fields.length) return;
+    vals.push(id);
+    await pool.query(`UPDATE prx_user_supplements SET ${fields.join(", ")} WHERE id = $${i}`, vals);
+  },
+
+  async deleteUserSupplement(id: number): Promise<void> {
+    await pool.query(`DELETE FROM prx_user_supplements WHERE id = $1`, [id]);
   },
 };
