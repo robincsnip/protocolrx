@@ -343,15 +343,108 @@ CRITICAL RULE on hasSplitDose — read carefully:
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // POST /api/supplements/nutrients — decompose all products into individual nutrients
-  app.post("/api/supplements/nutrients", requireAuth, async (req: AuthRequest, res: Response) => {
+  // POST /api/supplements/:id/scan-label — vision OCR of a label photo, store nutrients
+  app.post("/api/supplements/:id/scan-label", requireAuth, async (req: AuthRequest, res: Response) => {
     try {
       const apiKey = process.env.PERPLEXITY_API_KEY;
       if (!apiKey) return res.status(500).json({ error: "AI not configured" });
+      const id = parseInt(req.params.id);
+      const supplements = await storage.getUserSupplements(req.userId!);
+      const supp = supplements.find(s => s.id === id);
+      if (!supp) return res.status(403).json({ error: "Access denied" });
 
+      const { imageBase64, mimeType } = req.body as { imageBase64: string; mimeType: string };
+      if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
+
+      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "image_url",
+                image_url: { url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
+              },
+              {
+                type: "text",
+                text: `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON. Start with { end with }.
+
+Return:
+{
+  "productName": "exact product name from label",
+  "servingSize": "e.g. 3 capsules",
+  "nutrients": [
+    { "name": "Vitamin D3", "amount": "2000", "unit": "IU", "dailyValue": "500%" }
+  ]
+}
+
+Include every line from the Supplement Facts panel. Use exact amounts shown. If a nutrient has no Daily Value, leave dailyValue as empty string.`,
+              },
+            ],
+          }],
+          max_tokens: 3000,
+        }),
+      });
+      const aiData = await aiRes.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try {
+        const match = raw.match(/\{[\s\S]*/);
+        parsed = JSON.parse(match ? match[0] : raw);
+      } catch { return res.status(500).json({ error: "Could not read label. Try a clearer photo." }); }
+
+      // Store the nutrients on this supplement
+      await storage.saveLabelNutrients(id, parsed.nutrients || []);
+      res.json(parsed);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/supplements/nutrients — combine stored label nutrients from all scanned supplements
+  app.post("/api/supplements/nutrients", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
       const supplements = await storage.getUserSupplements(req.userId!);
       if (supplements.length === 0) return res.status(400).json({ error: "No supplements logged" });
 
+      // Aggregate nutrients from scanned labels
+      const nutrientMap: Record<string, { amount: number; unit: string; sources: string[] }> = {};
+      let unscanned: typeof supplements = [];
+
+      for (const s of supplements) {
+        const labelNutrients = (s as any).labelNutrients as { name: string; amount: string; unit: string }[] | null;
+        if (labelNutrients && labelNutrients.length > 0) {
+          for (const n of labelNutrients) {
+            const key = n.name.toLowerCase();
+            const amt = parseFloat(n.amount) || 0;
+            if (!nutrientMap[key]) nutrientMap[key] = { amount: 0, unit: n.unit, sources: [] };
+            nutrientMap[key].amount += amt;
+            if (!nutrientMap[key].sources.includes(s.name)) nutrientMap[key].sources.push(s.name);
+          }
+        } else {
+          unscanned.push(s);
+        }
+      }
+
+      const scannedNutrients = Object.entries(nutrientMap).map(([key, v]) => ({
+        name: key.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+        totalDailyDose: v.amount % 1 === 0 ? String(v.amount) : v.amount.toFixed(2),
+        unit: v.unit,
+        sources: v.sources,
+        fromLabel: true,
+      }));
+
+      // If all supplements have been scanned, return immediately
+      if (unscanned.length === 0) return res.json({ nutrients: scannedNutrients, unscanned: [] });
+
+      // Still need AI for unscanned ones — return what we have plus a flag
+      return res.json({
+        nutrients: scannedNutrients,
+        unscanned: unscanned.map(s => s.name),
+      });
+
+      // Dead code below kept for reference — the productList AI approach was unreliable
       const productList = supplements.map(s =>
         `- ${s.name}: ${s.dose} ${s.unit} ${s.frequency}${s.notes ? ` (${s.notes})` : ""}`
       ).join("\n");

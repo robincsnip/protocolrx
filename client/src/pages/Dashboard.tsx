@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { FlaskConical, CheckCircle, AlertTriangle, Bell, Plus, ChevronRight,
   Zap, Play, Pause, XCircle, LogOut, Activity, Loader2,
-  ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check } from "lucide-react";
+  ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check, Camera, ScanLine } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -298,8 +298,12 @@ function SupplementsTab({ userId }: { userId: number }) {
   const [form, setForm] = useState({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" });
   const [analysis, setAnalysis] = useState<SupplementAnalysis | null>(null);
   const [analysing, setAnalysing] = useState(false);
-  const [nutrients, setNutrients] = useState<{ name: string; totalDailyDose: string; unit: string; sources: string[] }[] | null>(null);
+  const [nutrients, setNutrients] = useState<{ name: string; totalDailyDose: string; unit: string; sources: string[]; fromLabel?: boolean }[] | null>(null);
+  const [unscannedList, setUnscannedList] = useState<string[]>([]);
   const [loadingNutrients, setLoadingNutrients] = useState(false);
+  const [scanningId, setScanningId] = useState<number | null>(null);
+  const labelInputRef = useRef<HTMLInputElement>(null);
+  const scanTargetIdRef = useRef<number | null>(null);
 
   const { data: supplements, refetch } = useQuery<UserSupplement[]>({
     queryKey: ["/api/supplements"],
@@ -399,8 +403,39 @@ function SupplementsTab({ userId }: { userId: number }) {
     try {
       const data = await apiRequest("POST", "/api/supplements/nutrients");
       setNutrients(data.nutrients ?? []);
+      setUnscannedList(data.unscanned ?? []);
     } catch (e: any) { toast({ title: "Failed", description: e.message, variant: "destructive" }); }
     finally { setLoadingNutrients(false); }
+  }
+
+  function openLabelScanner(id: number) {
+    scanTargetIdRef.current = id;
+    labelInputRef.current?.click();
+  }
+
+  async function handleLabelImage(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file || !scanTargetIdRef.current) return;
+    e.target.value = "";
+    const id = scanTargetIdRef.current;
+    setScanningId(id);
+    try {
+      const base64 = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve((reader.result as string).split(',')[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const data = await apiRequest("POST", `/api/supplements/${id}/scan-label`, {
+        imageBase64: base64,
+        mimeType: file.type || "image/jpeg",
+      });
+      if (data.error) throw new Error(data.error);
+      refetch();
+      toast({ title: "Label scanned", description: `${data.nutrients?.length ?? 0} nutrients extracted from ${data.productName || "label"}.` });
+    } catch (e: any) {
+      toast({ title: "Scan failed", description: e.message, variant: "destructive" });
+    } finally { setScanningId(null); }
   }
 
   async function runAnalysis() {
@@ -416,10 +451,15 @@ function SupplementsTab({ userId }: { userId: number }) {
     moderate: "text-amber-400 bg-amber-500/10 border-amber-500/20",
     high: "text-red-400 bg-red-500/10 border-red-500/20" };
 
+  const hasLabel = (s: UserSupplement) => Array.isArray((s as any).labelNutrients) && (s as any).labelNutrients.length > 0;
+
   const isSaving = addM.isPending || editM.isPending;
 
   return (
     <div className="space-y-4">
+      {/* Hidden label photo input */}
+      <input ref={labelInputRef} type="file" accept="image/*" capture="environment" className="hidden" onChange={handleLabelImage} />
+
       {/* Header row */}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
@@ -636,6 +676,21 @@ function SupplementsTab({ userId }: { userId: number }) {
                 </p>
               </div>
               <div className="flex items-center gap-1 shrink-0">
+                {/* Label scan button — green if scanned, grey if not */}
+                <button
+                  onClick={() => openLabelScanner(s.id)}
+                  disabled={scanningId === s.id}
+                  title={hasLabel(s) ? "Label scanned — click to re-scan" : "Scan supplement label"}
+                  className={`p-1.5 rounded-lg transition-colors ${
+                    hasLabel(s)
+                      ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10"
+                      : "text-muted-foreground hover:text-sky-400 hover:bg-sky-500/10"
+                  }`}
+                >
+                  {scanningId === s.id
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Camera className="w-3.5 h-3.5" />}
+                </button>
                 <button onClick={() => startEdit(s)}
                   className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
                   <Pencil className="w-3.5 h-3.5" />
@@ -675,8 +730,16 @@ function SupplementsTab({ userId }: { userId: number }) {
               </div>
             ))}
           </div>
+          {unscannedList.length > 0 && (
+            <div className="px-4 py-2.5 border-t border-amber-500/20 bg-amber-500/5 flex items-start gap-2">
+              <Camera className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-[11px] text-amber-400">
+                Scan the label for: {unscannedList.join(", ")} — tap the camera icon on each card.
+              </p>
+            </div>
+          )}
           <p className="text-[10px] text-muted-foreground px-4 py-2 border-t border-border/40">
-            Based on label data for your logged products. Bioavailability may vary.
+            Based on scanned label data. Tap the 📷 icon on each supplement to scan its label.
           </p>
         </div>
       )}

@@ -84,8 +84,10 @@ async function initSchema() {
       unit TEXT NOT NULL DEFAULT 'mg',
       frequency TEXT NOT NULL DEFAULT 'daily',
       notes TEXT,
+      label_nutrients JSONB,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE prx_user_supplements ADD COLUMN IF NOT EXISTS label_nutrients JSONB;
   `);
   console.log("[prx] Schema ready");
 }
@@ -357,6 +359,7 @@ export const storage = {
     return rows.map(r => ({
       id: r.id, userId: r.user_id, name: r.name, dose: r.dose,
       unit: r.unit, frequency: r.frequency, notes: r.notes ?? null,
+      labelNutrients: r.label_nutrients ?? null,
       createdAt: r.created_at,
     }) as UserSupplement);
   },
@@ -371,6 +374,7 @@ export const storage = {
     const r = rows[0];
     return { id: r.id, userId: r.user_id, name: r.name, dose: r.dose,
       unit: r.unit, frequency: r.frequency, notes: r.notes ?? null,
+      labelNutrients: r.label_nutrients ?? null,
       createdAt: r.created_at } as UserSupplement;
   },
 
@@ -390,5 +394,12 @@ export const storage = {
 
   async deleteUserSupplement(id: number): Promise<void> {
     await pool.query(`DELETE FROM prx_user_supplements WHERE id = $1`, [id]);
+  },
+
+  async saveLabelNutrients(id: number, nutrients: object[]): Promise<void> {
+    await pool.query(
+      `UPDATE prx_user_supplements SET label_nutrients = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(nutrients), id]
+    );
   },
 };
