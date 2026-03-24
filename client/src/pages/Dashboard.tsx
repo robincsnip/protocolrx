@@ -341,8 +341,8 @@ function SupplementsTab({ userId }: { userId: number }) {
       const firstSlot = data.hasSplitDose && data.splitSchedule?.[0];
       setForm({
         name: data.name || searchQuery.trim(),
-        dose: firstSlot ? firstSlot.dose : (data.commonDose || ""),
-        unit: firstSlot ? firstSlot.unit : (data.unit || "mg"),
+        dose: firstSlot ? (firstSlot.dose ?? "") : (data.commonDose ?? ""),
+        unit: firstSlot ? (firstSlot.unit || "mg") : (data.unit || "mg"),
         frequency: data.frequency || "daily",
         notes: firstSlot ? `${firstSlot.time}${firstSlot.notes ? ` — ${firstSlot.notes}` : ""}` : (data.bestTiming || ""),
       });
@@ -510,7 +510,7 @@ function SupplementsTab({ userId }: { userId: number }) {
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Dose</label>
               <input className="w-full rounded-lg border border-border bg-background text-foreground text-sm px-3 py-2 focus:outline-none focus:ring-1 focus:ring-primary"
-                value={form.dose} onChange={e => setForm(f => ({ ...f, dose: e.target.value }))} />
+                value={form.dose ?? ""} onChange={e => setForm(f => ({ ...f, dose: e.target.value }))} />
             </div>
             <div>
               <label className="text-xs text-muted-foreground mb-1 block">Unit</label>
