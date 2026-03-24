@@ -298,6 +298,8 @@ function SupplementsTab({ userId }: { userId: number }) {
   const [form, setForm] = useState({ name: "", dose: "", unit: "mg", frequency: "daily", notes: "" });
   const [analysis, setAnalysis] = useState<SupplementAnalysis | null>(null);
   const [analysing, setAnalysing] = useState(false);
+  const [nutrients, setNutrients] = useState<{ name: string; totalDailyDose: string; unit: string; sources: string[] }[] | null>(null);
+  const [loadingNutrients, setLoadingNutrients] = useState(false);
 
   const { data: supplements, refetch } = useQuery<UserSupplement[]>({
     queryKey: ["/api/supplements"],
@@ -392,6 +394,15 @@ function SupplementsTab({ userId }: { userId: number }) {
     }
   }
 
+  async function runNutrients() {
+    setLoadingNutrients(true); setNutrients(null);
+    try {
+      const data = await apiRequest("POST", "/api/supplements/nutrients");
+      setNutrients(data.nutrients ?? []);
+    } catch (e: any) { toast({ title: "Failed", description: e.message, variant: "destructive" }); }
+    finally { setLoadingNutrients(false); }
+  }
+
   async function runAnalysis() {
     setAnalysing(true); setAnalysis(null);
     try {
@@ -420,6 +431,11 @@ function SupplementsTab({ userId }: { userId: number }) {
             onClick={runAnalysis} disabled={analysing}>
             {analysing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <ShieldAlert className="w-3.5 h-3.5" />}
             {analysing ? "Analysing…" : "Analyse vs protocols"}
+          </Button>
+          <Button size="sm" variant="outline" className="gap-1.5 border-violet-500/30 text-violet-400 hover:bg-violet-500/10"
+            onClick={runNutrients} disabled={loadingNutrients}>
+            {loadingNutrients ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Pill className="w-3.5 h-3.5" />}
+            {loadingNutrients ? "Loading…" : "Nutrient breakdown"}
           </Button>
           {addMode === "idle" && (
             <Button size="sm" className="gap-1.5" onClick={() => setAddMode("searching")}>
@@ -631,6 +647,37 @@ function SupplementsTab({ userId }: { userId: number }) {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Nutrient breakdown panel */}
+      {nutrients && (
+        <div className="rounded-xl border border-violet-500/20 bg-card overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-border/50 flex items-center justify-between">
+            <p className="text-xs font-semibold text-foreground uppercase tracking-wide">Nutrient breakdown — all sources combined</p>
+            <button onClick={() => setNutrients(null)} className="text-muted-foreground hover:text-foreground"><X className="w-3.5 h-3.5" /></button>
+          </div>
+          <div className="divide-y divide-border/40">
+            {nutrients.map((n, i) => (
+              <div key={i} className="flex items-center gap-3 px-4 py-2.5">
+                <div className="w-20 shrink-0 text-right">
+                  <span className="text-sm font-bold text-foreground">{n.totalDailyDose}</span>
+                  <span className="text-[10px] font-semibold text-violet-400 ml-1">{n.unit}</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-foreground">{n.name}</p>
+                  {(Array.isArray(n.sources) ? n.sources : [n.sources]).length > 0 && (
+                    <p className="text-[10px] text-muted-foreground truncate">
+                      {(Array.isArray(n.sources) ? n.sources : [n.sources]).join(" · ")}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+          <p className="text-[10px] text-muted-foreground px-4 py-2 border-t border-border/40">
+            Based on label data for your logged products. Bioavailability may vary.
+          </p>
         </div>
       )}
 

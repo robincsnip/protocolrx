@@ -343,6 +343,61 @@ CRITICAL RULE on hasSplitDose — read carefully:
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
+  // POST /api/supplements/nutrients — decompose all products into individual nutrients
+  app.post("/api/supplements/nutrients", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const apiKey = process.env.PERPLEXITY_API_KEY;
+      if (!apiKey) return res.status(500).json({ error: "AI not configured" });
+
+      const supplements = await storage.getUserSupplements(req.userId!);
+      if (supplements.length === 0) return res.status(400).json({ error: "No supplements logged" });
+
+      const productList = supplements.map(s =>
+        `- ${s.name}: ${s.dose} ${s.unit} ${s.frequency}${s.notes ? ` (${s.notes})` : ""}`
+      ).join("\n");
+
+      const prompt = `You are a nutritional biochemist. The user takes the following supplements daily. For each product, look up its label and extract every individual vitamin, mineral, and active compound with the exact amount provided by that product at the stated dose.
+
+RESPOND ONLY WITH VALID JSON. No markdown. Start with { end with }.
+
+PRODUCTS:
+${productList}
+
+IMPORTANT:
+- For multivitamins, list EVERY ingredient (all vitamins, minerals, cofactors).
+- If a product appears multiple times (AM + PM formula), combine/list them separately as appropriate.
+- Use standard nutrient names (e.g. "Vitamin D3", "Magnesium", "Zinc", "Vitamin B12").
+- Express all amounts in the unit shown on the label (mg, mcg, IU, etc.).
+- Where a product provides a nutrient across multiple entries (e.g. AM+PM multi), add them together into one total.
+
+Return:
+{
+  "nutrients": [
+    {
+      "name": "Vitamin D3",
+      "totalDailyDose": "4000",
+      "unit": "IU",
+      "sources": ["Thorne Multi-Vitamin Elite AM/PM", "AG1"]
+    }
+  ]
+}`;
+
+      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content: prompt }], max_tokens: 3000 }),
+      });
+      const aiData = await aiRes.json() as any;
+      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      let parsed: any;
+      try {
+        const match = raw.match(/\{[\s\S]*/);
+        parsed = JSON.parse(match ? match[0] : raw);
+      } catch { return res.status(500).json({ error: "Could not parse nutrient data. Try again." }); }
+      res.json(parsed);
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
   // POST /api/supplements/analyse — AI analysis: actual intake vs active protocols
   app.post("/api/supplements/analyse", requireAuth, async (req: AuthRequest, res: Response) => {
     try {
