@@ -669,14 +669,20 @@ function SupplementsTab({ userId }: { userId: number }) {
           )}
 
           {/* Stack optimisation tips */}
-          {(analysis.stackOptimisation ?? []).length > 0 && (
-            <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-1.5">
-              <p className="text-xs font-semibold text-primary uppercase tracking-wide">Stack optimisation</p>
-              {(analysis.stackOptimisation ?? []).map((tip, i) => (
-                <p key={i} className="text-xs text-foreground/80">→ {tip}</p>
-              ))}
-            </div>
-          )}
+          {(() => {
+            // AI sometimes returns this as a string instead of array — normalise
+            const tips = Array.isArray(analysis.stackOptimisation)
+              ? analysis.stackOptimisation
+              : analysis.stackOptimisation ? [analysis.stackOptimisation as unknown as string] : [];
+            return tips.length > 0 ? (
+              <div className="rounded-lg bg-primary/5 border border-primary/20 p-3 space-y-1.5">
+                <p className="text-xs font-semibold text-primary uppercase tracking-wide">Stack optimisation</p>
+                {tips.map((tip, i) => (
+                  <p key={i} className="text-xs text-foreground/80">→ {tip}</p>
+                ))}
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
     </div>
