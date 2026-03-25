@@ -478,11 +478,9 @@ RULES:
         { type: "image_url", image_url: { url: imageUrl } },
       ]);
 
-      // ── Step 3: Tag vision results as "photo" + de-duplicate ────────────────
+      // ── Step 3: De-duplicate within the vision result ─────────────────────
       if (parsed && Array.isArray(parsed.nutrients)) {
-        parsed.nutrients = deduplicateScan(
-          parsed.nutrients.map((n: any) => ({ ...n, source: "photo" }))
-        );
+        parsed.nutrients = deduplicateScan(parsed.nutrients);
       }
 
       const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
@@ -510,13 +508,8 @@ Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total; skip
 Search iHerb, manufacturer website, Examine.com, or FDA databases for the real label data.`,
         }]);
         if (textParsed && Array.isArray(textParsed.nutrients) && textParsed.nutrients.length > 0) {
-          parsed = {
-            ...textParsed,
-            nutrients: deduplicateScan(
-              textParsed.nutrients.map((n: any) => ({ ...n, source: "search" }))
-            ),
-          };
-          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients (tagged source=search)`);
+          parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
+          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients`);
         }
       }
 

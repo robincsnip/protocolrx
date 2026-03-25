@@ -87,51 +87,39 @@ export function canonicalizeNutrient(name: string): string {
   return s.replace(/[,;.]+$/, "").trim();
 }
 
-// source field added to each nutrient so we can apply source-aware merge priority
 export interface LabelNutrient {
   name: string;
   amount: string;
   unit: string;
   dailyValue?: string;
-  source?: "photo" | "search" | "manual"; // undefined = legacy, treated as "search"
+  source?: "photo" | "search" | "manual";
 }
 
 /**
- * Merge two arrays of label nutrients for multi-photo scanning.
+ * Merge two nutrient arrays for "add another photo".
  *
- * Priority (highest → lowest):
- *   1. "photo"  — data read directly from a label photograph
- *   2. "search" — data fetched from the internet (sonar-pro text search)
- *   3. undefined — legacy rows with no source tag, treated as "search"
+ * The incoming scan (new photo) always wins for any nutrient it explicitly
+ * returned — whether that key existed before or not. This ensures a real photo
+ * always overrides internet-fetched data that may have been mixed in with a
+ * previous scan.
  *
- * Rules:
- *   - photo always beats search, even if the search row already exists
- *   - photo vs photo → existing wins (prevents AI hallucinations on photo 2
- *     from overwriting correct values from photo 1)
- *   - search vs search → existing wins
- *   - any incoming row for a key not yet present is always added
+ * Keys that only exist in the existing array and were NOT returned by the new
+ * scan are kept as-is (they came from a different page the new photo didn’t
+ * cover).
+ *
+ * "search" rows are ONLY kept if the incoming scan has no opinion on them.
+ * The moment a photo scan mentions the same nutrient, the photo value wins.
  */
 export function mergeNutrients(existing: LabelNutrient[], incoming: LabelNutrient[]): LabelNutrient[] {
-  const map = new Map<string, LabelNutrient>();
-  for (const n of existing) map.set(canonicalizeNutrient(n.name), n);
+  // Build a set of canonical keys the new scan explicitly returned
+  const incomingKeys = new Set(incoming.map(n => canonicalizeNutrient(n.name)));
 
-  for (const n of incoming) {
-    const key = canonicalizeNutrient(n.name);
-    const cur = map.get(key);
-    if (!cur) {
-      // Key not present at all — always add
-      map.set(key, n);
-    } else {
-      const curIsPhoto = cur.source === "photo";
-      const newIsPhoto = n.source === "photo";
-      if (newIsPhoto && !curIsPhoto) {
-        // Photo beats internet data — overwrite
-        map.set(key, n);
-      }
-      // photo vs photo or search vs search → existing wins (no overwrite)
-    }
-  }
-  return Array.from(map.values());
+  // Start from existing, but DROP any key that the incoming scan also covers
+  // (incoming will supply the authoritative value for those)
+  const base = existing.filter(n => !incomingKeys.has(canonicalizeNutrient(n.name)));
+
+  // Append all incoming rows (they win for their keys)
+  return [...base, ...incoming];
 }
 
 /**
