@@ -478,19 +478,18 @@ RULES:
         { type: "image_url", image_url: { url: imageUrl } },
       ]);
 
-      // ── Step 3: De-duplicate within the single scan result ───────────────────
-      // Removes sub-form duplicates (e.g. "Folate" + "Folic Acid" in same response)
+      // ── Step 3: Tag vision results as "photo" + de-duplicate ────────────────
       if (parsed && Array.isArray(parsed.nutrients)) {
-        parsed.nutrients = deduplicateScan(parsed.nutrients);
+        parsed.nutrients = deduplicateScan(
+          parsed.nutrients.map((n: any) => ({ ...n, source: "photo" }))
+        );
       }
 
       const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
       console.log(`[scan-label] vision returned ${visionCount} nutrients`);
 
       // ── Step 4 (last resort): text lookup ONLY when vision completely failed ─────
-      // DO NOT merge text-search results with vision results — web data may be a
-      // different product version. Use photo as ground truth; text only fills a
-      // total blank (can't read photo at all).
+      // Tag as "search" so the merge logic knows photo data always beats this.
       if (visionCount === 0) {
         console.log(`[scan-label] vision returned nothing — falling back to text lookup for "${supp.name}"`);
         const textParsed = await callPplx([{
@@ -511,8 +510,13 @@ Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total; skip
 Search iHerb, manufacturer website, Examine.com, or FDA databases for the real label data.`,
         }]);
         if (textParsed && Array.isArray(textParsed.nutrients) && textParsed.nutrients.length > 0) {
-          parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
-          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients`);
+          parsed = {
+            ...textParsed,
+            nutrients: deduplicateScan(
+              textParsed.nutrients.map((n: any) => ({ ...n, source: "search" }))
+            ),
+          };
+          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients (tagged source=search)`);
         }
       }
 

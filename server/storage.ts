@@ -87,32 +87,49 @@ export function canonicalizeNutrient(name: string): string {
   return s.replace(/[,;.]+$/, "").trim();
 }
 
-interface LabelNutrient { name: string; amount: string; unit: string; dailyValue?: string; }
+// source field added to each nutrient so we can apply source-aware merge priority
+export interface LabelNutrient {
+  name: string;
+  amount: string;
+  unit: string;
+  dailyValue?: string;
+  source?: "photo" | "search" | "manual"; // undefined = legacy, treated as "search"
+}
 
 /**
  * Merge two arrays of label nutrients for multi-photo scanning.
  *
- * Strategy: EXISTING WINS (additive-only).
- * - If a nutrient key already exists, keep the existing value unchanged.
- * - If a nutrient key only appears in incoming, add it.
+ * Priority (highest → lowest):
+ *   1. "photo"  — data read directly from a label photograph
+ *   2. "search" — data fetched from the internet (sonar-pro text search)
+ *   3. undefined — legacy rows with no source tag, treated as "search"
  *
- * Rationale: when the user scans a second photo ("add another photo"), they
- * intend to ADD new rows from that page, not overwrite what they already
- * carefully scanned/edited. The AI often re-reads nutrients it knows from context
- * (hallucination or partial label visibility) with wrong amounts — existing-wins
- * prevents those hallucinations from corrupting already-correct data.
- *
- * To deliberately replace existing data, use "Re-scan (replace all)" which calls
- * clearUserLabelNutrients() first, so existing is empty and incoming wins by default.
+ * Rules:
+ *   - photo always beats search, even if the search row already exists
+ *   - photo vs photo → existing wins (prevents AI hallucinations on photo 2
+ *     from overwriting correct values from photo 1)
+ *   - search vs search → existing wins
+ *   - any incoming row for a key not yet present is always added
  */
 export function mergeNutrients(existing: LabelNutrient[], incoming: LabelNutrient[]): LabelNutrient[] {
   const map = new Map<string, LabelNutrient>();
-  // Load existing first — these are locked in
   for (const n of existing) map.set(canonicalizeNutrient(n.name), n);
-  // Only add nutrients that don’t already exist (existing wins)
+
   for (const n of incoming) {
     const key = canonicalizeNutrient(n.name);
-    if (!map.has(key)) map.set(key, n);
+    const cur = map.get(key);
+    if (!cur) {
+      // Key not present at all — always add
+      map.set(key, n);
+    } else {
+      const curIsPhoto = cur.source === "photo";
+      const newIsPhoto = n.source === "photo";
+      if (newIsPhoto && !curIsPhoto) {
+        // Photo beats internet data — overwrite
+        map.set(key, n);
+      }
+      // photo vs photo or search vs search → existing wins (no overwrite)
+    }
   }
   return Array.from(map.values());
 }
