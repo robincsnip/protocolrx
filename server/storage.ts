@@ -227,6 +227,13 @@ async function initSchema() {
     );
     ALTER TABLE prx_user_supplements ADD COLUMN IF NOT EXISTS label_nutrients JSONB;
 
+    -- Temporary image store for label scans (cross-instance safe, expires after 10 min)
+    CREATE TABLE IF NOT EXISTS prx_temp_images (
+      token TEXT PRIMARY KEY,
+      image_b64 TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '10 minutes'
+    );
+
     -- Shared product label cache — one row per unique product
     -- name_slug is a normalised key (lower-case, stripped punctuation)
     CREATE TABLE IF NOT EXISTS prx_product_cache (
@@ -548,6 +555,26 @@ export const storage = {
   },
 
   // ── Product cache ─────────────────────────────────────────────────────────────────
+
+  async storeTempImage(token: string, imageB64: string): Promise<void> {
+    await pool.query(
+      `INSERT INTO prx_temp_images (token, image_b64) VALUES ($1, $2)
+       ON CONFLICT (token) DO UPDATE SET image_b64 = $2, expires_at = NOW() + INTERVAL '10 minutes'`,
+      [token, imageB64]
+    );
+  },
+
+  async getTempImage(token: string): Promise<string | null> {
+    const { rows } = await pool.query(
+      `SELECT image_b64 FROM prx_temp_images WHERE token = $1 AND expires_at > NOW()`,
+      [token]
+    );
+    return rows[0]?.image_b64 ?? null;
+  },
+
+  async deleteTempImage(token: string): Promise<void> {
+    await pool.query(`DELETE FROM prx_temp_images WHERE token = $1`, [token]);
+  },
 
   async getCachedProduct(slug: string): Promise<{ productName: string; servingSize: string | null; nutrients: object[]; scanCount: number } | null> {
     const { rows } = await pool.query(

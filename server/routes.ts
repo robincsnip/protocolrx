@@ -3,8 +3,6 @@ import type { Server } from "http";
 import { registerAuthRoutes, requireAuth, type AuthRequest } from "./auth";
 import { storage, canonicalizeNutrient, productSlug, mergeNutrients, deduplicateScan } from "./storage";
 import type { Response } from "express";
-import * as fs from "fs";
-import * as path from "path";
 import * as crypto from "crypto";
 
 // Normalise unit strings — strip DFE / NE / RAE qualifiers so aggregation stays
@@ -355,22 +353,14 @@ CRITICAL RULE on hasSplitDose — read carefully:
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // Temp image store: token -> { filePath, expires }
-  const tempImages = new Map<string, { filePath: string; expires: number }>();
-
   // GET /api/supplements/label-img/:token — serve a temporarily stored label image
-  // Used so sonar-pro can fetch the image via a public HTTPS URL
-  app.get("/api/supplements/label-img/:token", (req, res) => {
-    const entry = tempImages.get(req.params.token);
-    if (!entry || Date.now() > entry.expires) {
-      tempImages.delete(req.params.token);
-      return res.status(404).send("Not found");
-    }
+  // Stored in Neon DB so it works across all Railway container instances.
+  app.get("/api/supplements/label-img/:token", async (req, res) => {
+    const b64 = await storage.getTempImage(req.params.token);
+    if (!b64) return res.status(404).send("Not found or expired");
     res.setHeader("Content-Type", "image/jpeg");
     res.setHeader("Cache-Control", "no-store");
-    const stream = fs.createReadStream(entry.filePath);
-    stream.on("error", () => res.status(404).send("Not found"));
-    stream.pipe(res);
+    res.send(Buffer.from(b64, "base64"));
   });
 
   // POST /api/supplements/:id/scan-label — label OCR + nutrient extraction
@@ -505,17 +495,14 @@ Search iHerb, manufacturer website, or FDA databases for the real label data.` }
     }
 
     try {
-      // ── Step 1: Save image to /tmp and expose as public HTTPS URL ──────────────
+      // ── Step 1: Store image in DB and expose as public HTTPS URL ────────────
+      // Using DB (not /tmp) so it works across all Railway container instances.
       const token = crypto.randomBytes(16).toString("hex");
-      const tmpDir = "/tmp/prx-labels";
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-      const filePath = path.join(tmpDir, `${token}.jpg`);
-      fs.writeFileSync(filePath, Buffer.from(imageBase64, "base64"));
-      tempImages.set(token, { filePath, expires: Date.now() + 5 * 60 * 1000 });
+      await storage.storeTempImage(token, imageBase64);
 
       const appUrl = process.env.APP_URL || "https://protocolrx-production.up.railway.app";
       const imageUrl = `${appUrl}/api/supplements/label-img/${token}`;
-      console.log(`[scan-label] serving image at ${imageUrl}`);
+      console.log(`[scan-label] image stored in DB, serving at ${imageUrl}`);
 
       // ── Step 2: Vision call — strict image-only OCR ────────────────────────
       let parsed = await callVision(imageUrl);
@@ -524,9 +511,8 @@ Search iHerb, manufacturer website, or FDA databases for the real label data.` }
       const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
       console.log(`[scan-label] vision returned ${visionCount} nutrients`);
 
-      // ── Cleanup temp image ───────────────────────────────────────────────────
-      try { fs.unlinkSync(filePath); } catch { /* ignore */ }
-      tempImages.delete(token);
+      // ── Cleanup temp image from DB ───────────────────────────────────
+      await storage.deleteTempImage(token).catch(() => {});
 
       // ── Step 3 (last resort): text search ONLY when vision returned 0 rows  ───
       // AND there is no existing label data (i.e. this is the first scan and the
