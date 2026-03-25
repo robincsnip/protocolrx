@@ -422,22 +422,30 @@ CRITICAL RULE on hasSplitDose — read carefully:
       await storage.clearUserLabelNutrients(id);
     }
 
-    const PPLX_PROMPT = `Extract nutrients from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+    // VISION prompt: strict "only what you literally see" instruction.
+    // search_context_size: "low" minimises sonar-pro's web augmentation so it
+    // relies more on the image and less on training/search data.
+    const VISION_PROMPT = `You are a document scanner reading a supplement label photograph.
+READ ONLY what is literally printed and visible in this image.
+DO NOT add, infer, or supplement with any outside knowledge or web data.
+If you cannot clearly read a value, omit that row — do not guess.
 
-Return exactly:
+RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+
 {
-  "productName": "exact product name from label",
-  "servingSize": "e.g. 3 capsules",
+  "productName": "exact product name visible in image",
+  "servingSize": "serving size visible in image",
   "nutrients": [
     { "name": "Vitamin D3", "amount": "2000", "unit": "IU", "dailyValue": "500%" }
   ]
 }
 
 RULES:
-- Include every row from the Supplement Facts panel with exact amounts.
-- Use the SIMPLE unit (e.g. "mcg" not "mcg DFE", "mg" not "mg NE").
-- When a nutrient has BOTH a total amount AND a sub-form (e.g. "Folate 400 mcg" with indented "(240 mcg folic acid)"), output ONLY the top-level total row — skip the indented sub-form.
-- Set dailyValue to "" if not listed.`;
+- Only include rows you can directly read from the Supplement Facts panel in this image.
+- Use the SIMPLE unit ("mcg" not "mcg DFE", "mg" not "mg NE").
+- When a nutrient has both a total and an indented sub-form, output ONLY the top-level total row.
+- Set dailyValue to "" if not listed.
+- If the image shows no supplement facts panel, return { "productName": "", "servingSize": "", "nutrients": [] }`;
 
     function extractJson(raw: string): any {
       const start = raw.indexOf("{");
@@ -446,16 +454,55 @@ RULES:
       return JSON.parse(raw.slice(start, end + 1));
     }
 
-    async function callPplx(content: any[]): Promise<any | null> {
+    // Vision call: image URL + strict prompt, web search minimised
+    async function callVision(imageUrl: string): Promise<any | null> {
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content }], max_tokens: 4000 }),
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{ role: "user", content: [
+            { type: "text", text: VISION_PROMPT },
+            { type: "image_url", image_url: { url: imageUrl } },
+          ]}],
+          max_tokens: 4000,
+          web_search_options: { search_context_size: "low" },
+        }),
       });
-      if (!r.ok) { console.error(`[scan-label] pplx ${r.status}:`, await r.text()); return null; }
+      if (!r.ok) { console.error(`[scan-label] vision ${r.status}:`, await r.text()); return null; }
       const d = await r.json() as any;
       const raw: string = d.choices?.[0]?.message?.content || "";
-      console.log(`[scan-label] pplx raw (300 chars):`, raw.substring(0, 300));
+      console.log(`[scan-label] vision raw (300 chars):`, raw.substring(0, 300));
+      try { return extractJson(raw); } catch { return null; }
+    }
+
+    // Text search call: used ONLY as last-resort fallback when vision returns 0 rows
+    // and the user has no existing label data at all (first scan, unreadable photo)
+    async function callTextSearch(name: string, dose: string, unit: string): Promise<any | null> {
+      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "sonar-pro",
+          messages: [{ role: "user", content: `Look up the COMPLETE supplement facts label for "${name}"${dose ? ` ${dose}${unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+
+Return:
+{
+  "productName": "exact product name",
+  "servingSize": "serving size from label",
+  "nutrients": [
+    { "name": "nutrient name", "amount": "amount", "unit": "unit", "dailyValue": "% or empty string" }
+  ]
+}
+
+Include ALL nutrients from the label. Use SIMPLE units ("mcg" not "mcg DFE"). Skip indented sub-forms.
+Search iHerb, manufacturer website, or FDA databases for the real label data.` }],
+          max_tokens: 4000,
+        }),
+      });
+      if (!r.ok) { return null; }
+      const d = await r.json() as any;
+      const raw: string = d.choices?.[0]?.message?.content || "";
       try { return extractJson(raw); } catch { return null; }
     }
 
@@ -472,53 +519,37 @@ RULES:
       const imageUrl = `${appUrl}/api/supplements/label-img/${token}`;
       console.log(`[scan-label] serving image at ${imageUrl}`);
 
-      // ── Step 2: Vision call with public URL ──────────────────────────────────
-      let parsed = await callPplx([
-        { type: "text", text: PPLX_PROMPT },
-        { type: "image_url", image_url: { url: imageUrl } },
-      ]);
-
-      // ── Step 3: De-duplicate within the vision result ─────────────────────
-      if (parsed && Array.isArray(parsed.nutrients)) {
-        parsed.nutrients = deduplicateScan(parsed.nutrients);
-      }
+      // ── Step 2: Vision call — strict image-only OCR ────────────────────────
+      let parsed = await callVision(imageUrl);
+      if (parsed?.nutrients) parsed.nutrients = deduplicateScan(parsed.nutrients);
 
       const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
       console.log(`[scan-label] vision returned ${visionCount} nutrients`);
-
-      // ── Step 4 (last resort): text lookup ONLY when vision completely failed ─────
-      // Tag as "search" so the merge logic knows photo data always beats this.
-      if (visionCount === 0) {
-        console.log(`[scan-label] vision returned nothing — falling back to text lookup for "${supp.name}"`);
-        const textParsed = await callPplx([{
-          type: "text",
-          text: `Look up the COMPLETE supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
-
-Return:
-{
-  "productName": "exact product name",
-  "servingSize": "serving size from label",
-  "nutrients": [
-    { "name": "nutrient name", "amount": "amount", "unit": "unit", "dailyValue": "% daily value or empty string" }
-  ]
-}
-
-IMPORTANT: Include ALL nutrients — every single row from the label. Do not truncate.
-Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total; skip indented sub-forms.
-Search iHerb, manufacturer website, Examine.com, or FDA databases for the real label data.`,
-        }]);
-        if (textParsed && Array.isArray(textParsed.nutrients) && textParsed.nutrients.length > 0) {
-          parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
-          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients`);
-        }
-      }
 
       // ── Cleanup temp image ───────────────────────────────────────────────────
       try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       tempImages.delete(token);
 
+      // ── Step 3 (last resort): text search ONLY when vision returned 0 rows  ───
+      // AND there is no existing label data (i.e. this is the first scan and the
+      // photo was unreadable). Never use text search when merging a second photo
+      // — it would mix internet guesses into real label data.
+      if (visionCount === 0) {
+        const hasExisting = Array.isArray((supp as any).labelNutrients) && (supp as any).labelNutrients.length > 0;
+        if (!hasExisting) {
+          console.log(`[scan-label] vision returned 0, no existing data — text search fallback for "${supp.name}"`);
+          const textParsed = await callTextSearch(supp.name, supp.dose, supp.unit);
+          if (textParsed?.nutrients?.length > 0) {
+            parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
+            console.log(`[scan-label] text search returned ${parsed.nutrients.length} nutrients`);
+          }
+        } else {
+          console.log(`[scan-label] vision returned 0 but existing data present — skipping text search to avoid overwrite`);
+        }
+      }
+
       if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
-        return res.status(500).json({ error: "Could not extract label data. Try a clearer photo or check the supplement name." });
+        return res.status(500).json({ error: "Could not read any nutrients from this photo. Try a clearer, well-lit shot of the Supplement Facts panel." });
       }
 
       // ── Step 4: Save to user row, then write the MERGED result to cache ─────
