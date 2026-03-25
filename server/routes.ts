@@ -356,6 +356,8 @@ CRITICAL RULE on hasSplitDose — read carefully:
       const { imageBase64, mimeType } = req.body as { imageBase64: string; mimeType: string };
       if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
+      console.log(`[scan-label] supplementId=${id} imageBase64 length=${imageBase64.length} (~${Math.round(imageBase64.length * 0.75 / 1024)}KB)`);
+
       const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -370,9 +372,9 @@ CRITICAL RULE on hasSplitDose — read carefully:
               },
               {
                 type: "text",
-                text: `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON. Start with { end with }.
+                text: `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no explanation, no code fences. Output must start with { and end with }.
 
-Return:
+Return exactly this shape:
 {
   "productName": "exact product name from label",
   "servingSize": "e.g. 3 capsules",
@@ -381,25 +383,43 @@ Return:
   ]
 }
 
-Include every line from the Supplement Facts panel. Use exact amounts shown. If a nutrient has no Daily Value, leave dailyValue as empty string.`,
+Include every line from the Supplement Facts panel. Use exact amounts shown. If a nutrient has no Daily Value, set dailyValue to "".`,
               },
             ],
           }],
           max_tokens: 3000,
         }),
       });
+
+      if (!aiRes.ok) {
+        const errText = await aiRes.text();
+        console.error(`[scan-label] Perplexity error ${aiRes.status}:`, errText);
+        return res.status(502).json({ error: `AI service error: ${aiRes.status}` });
+      }
+
       const aiData = await aiRes.json() as any;
-      const raw = aiData.choices?.[0]?.message?.content || "{}";
+      const raw: string = aiData.choices?.[0]?.message?.content || "{}";
+      console.log(`[scan-label] raw AI response (first 300 chars):`, raw.substring(0, 300));
+
       let parsed: any;
       try {
-        const match = raw.match(/\{[\s\S]*/);
-        parsed = JSON.parse(match ? match[0] : raw);
-      } catch { return res.status(500).json({ error: "Could not read label. Try a clearer photo." }); }
+        // Extract the outermost JSON object — handles trailing citations or extra text
+        const start = raw.indexOf("{");
+        const end = raw.lastIndexOf("}");
+        if (start === -1 || end === -1) throw new Error("No JSON object in response");
+        parsed = JSON.parse(raw.slice(start, end + 1));
+      } catch (parseErr: any) {
+        console.error("[scan-label] JSON parse failed:", parseErr.message, "raw:", raw.substring(0, 500));
+        return res.status(500).json({ error: "Could not read label. Try a clearer, well-lit photo of the Supplement Facts panel." });
+      }
 
       // Store the nutrients on this supplement
       await storage.saveLabelNutrients(id, parsed.nutrients || []);
       res.json(parsed);
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
+    } catch (e: any) {
+      console.error("[scan-label] unexpected error:", e);
+      res.status(500).json({ error: e.message });
+    }
   });
 
   // POST /api/supplements/nutrients — combine stored label nutrients from all scanned supplements

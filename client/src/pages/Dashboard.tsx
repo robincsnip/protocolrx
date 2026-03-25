@@ -413,6 +413,34 @@ function SupplementsTab({ userId }: { userId: number }) {
     labelInputRef.current?.click();
   }
 
+  /** Compress an image File to a JPEG base64 string. Max 1400px on longest side, quality 0.75. */
+  async function compressImage(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const objectUrl = URL.createObjectURL(file);
+      img.onload = () => {
+        URL.revokeObjectURL(objectUrl);
+        const MAX = 1400;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
+          else { width = Math.round(width * MAX / height); height = MAX; }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return reject(new Error("Canvas not supported"));
+        ctx.drawImage(img, 0, 0, width, height);
+        // Strip data: prefix — we only want the raw base64 bytes
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+        resolve(dataUrl.split(",")[1]);
+      };
+      img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load image")); };
+      img.src = objectUrl;
+    });
+  }
+
   async function handleLabelImage(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file || !scanTargetIdRef.current) return;
@@ -420,15 +448,11 @@ function SupplementsTab({ userId }: { userId: number }) {
     const id = scanTargetIdRef.current;
     setScanningId(id);
     try {
-      const base64 = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve((reader.result as string).split(',')[1]);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+      // Compress before encoding — phone photos are 5-15 MB; we need <10 MB total payload
+      const base64 = await compressImage(file);
       const data = await apiRequest("POST", `/api/supplements/${id}/scan-label`, {
         imageBase64: base64,
-        mimeType: file.type || "image/jpeg",
+        mimeType: "image/jpeg",
       });
       if (data.error) throw new Error(data.error);
       refetch();
