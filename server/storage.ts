@@ -1,6 +1,106 @@
 import { Pool } from "pg";
 import type { User, Protocol, UserProtocol, Checkin, Nudge, UserSupplement, InsertSupplement } from "@shared/schema";
 
+// ─── Nutrient canonicalisation ────────────────────────────────────────────────
+//
+// Converts a raw nutrient name (as returned by AI / label OCR) to a stable
+// lower-case canonical key used for deduplication and aggregation.
+//
+// Rules applied in order:
+//  1. Lower-case and trim
+//  2. Strip parenthetical qualifiers  e.g. "Folate (as 5-MTHF)" → "folate"
+//  3. Strip trailing form descriptors  e.g. "magnesium (from chelate)" → "magnesium"
+//  4. Alias map — common synonyms / different label wordings → single canonical name
+//  5. Strip any remaining trailing whitespace / punctuation
+
+const ALIAS_MAP: [RegExp, string][] = [
+  // Folate / folic acid — all forms map to "folate"
+  [/\bfolic acid\b/, "folate"],
+  [/\bfolate\b/, "folate"],
+  // Vitamin B aliases
+  [/\bthiamin(e)?\b/, "vitamin b1"],
+  [/\bvitamin b-?1\b/, "vitamin b1"],
+  [/\briboflavin\b/, "vitamin b2"],
+  [/\bvitamin b-?2\b/, "vitamin b2"],
+  [/\bniacin(amide)?\b|\bnicotinic acid\b|\bnicotinamide\b/, "niacin"],
+  [/\bvitamin b-?3\b/, "niacin"],
+  [/\bpantothenic acid\b|\bcalcium pantothenate\b/, "pantothenic acid"],
+  [/\bvitamin b-?5\b/, "pantothenic acid"],
+  [/\bpyridoxine\b|\bpyridoxal\b/, "vitamin b6"],
+  [/\bvitamin b-?6\b/, "vitamin b6"],
+  [/\bbiotin\b/, "biotin"],
+  [/\bvitamin b-?7\b/, "biotin"],
+  [/\bcobalamin\b|\bcyanocobalamin\b|\bmethylcobalamin\b|\badenosylcobalamin\b/, "vitamin b12"],
+  [/\bvitamin b-?12\b/, "vitamin b12"],
+  // Vitamin D forms
+  [/\bvitamin d-?2\b|\bergocalciferol\b/, "vitamin d2"],
+  [/\bvitamin d-?3\b|\bcholecalciferol\b/, "vitamin d3"],
+  [/\bvitamin d\b(?![-23])/, "vitamin d"],
+  // Vitamin K forms
+  [/\bvitamin k-?1\b|\bphylloquinone\b|\bphytonadione\b/, "vitamin k1"],
+  [/\bvitamin k-?2\b|\bmenaquinone\b|\bmk-?\d+\b/, "vitamin k2"],
+  [/\bvitamin k\b(?![-12])/, "vitamin k"],
+  // Vitamin E
+  [/\btocopherol\b|\btocotrienol\b/, "vitamin e"],
+  // Vitamin C
+  [/\bascorbic acid\b|\bascorbate\b/, "vitamin c"],
+  // Vitamin A
+  [/\bbeta.?carotene\b/, "vitamin a (beta-carotene)"],
+  [/\bretinol\b|\bretinyl\b/, "vitamin a (retinol)"],
+  // Minerals — common label variants
+  [/\belemental magnesium\b/, "magnesium"],
+  [/\belemental zinc\b/, "zinc"],
+  [/\belemental iron\b/, "iron"],
+  [/\belemental calcium\b/, "calcium"],
+  [/\belemental copper\b/, "copper"],
+  // Omega-3
+  [/\beicosapentaenoic acid\b/, "epa"],
+  [/\bdocosahexaenoic acid\b/, "dha"],
+  [/\bomega.?3\b/, "omega-3"],
+];
+
+export function canonicalizeNutrient(name: string): string {
+  // Step 1: lower-case & trim
+  let s = name.toLowerCase().trim();
+  // Step 2: strip parenthetical qualifiers  "vitamin d3 (as cholecalciferol)" → "vitamin d3"
+  s = s.replace(/\s*\(.*?\)/g, "").trim();
+  // Step 3: strip "from ..." / "as ..." trailing forms (without parens)
+  s = s.replace(/\s+(from|as|derived from|in the form of)\s+.*/i, "").trim();
+  // Step 4: alias map
+  for (const [pattern, canonical] of ALIAS_MAP) {
+    if (pattern.test(s)) { s = canonical; break; }
+  }
+  // Step 5: strip trailing punctuation / extra spaces
+  return s.replace(/[,;.]+$/, "").trim();
+}
+
+interface LabelNutrient { name: string; amount: string; unit: string; dailyValue?: string; }
+
+/**
+ * Merge two arrays of label nutrients.
+ * For nutrients with the same canonical key, keep the entry with the HIGHEST
+ * numeric amount (safe assumption: if the same nutrient appears on two label
+ * pages, one is likely a sub-form and the other is the total).
+ * Preserves the display name and unit from whichever entry has the higher amount.
+ */
+export function mergeNutrients(existing: LabelNutrient[], incoming: LabelNutrient[]): LabelNutrient[] {
+  // Build a map keyed by canonical name — value is the current best entry + its numeric amount
+  const map = new Map<string, { entry: LabelNutrient; numericAmount: number }>();
+
+  for (const n of [...existing, ...incoming]) {
+    const key = canonicalizeNutrient(n.name);
+    const amt = parseFloat(n.amount) || 0;
+    const existing = map.get(key);
+    // Keep whichever entry has the higher amount
+    // (same nutrient listed as total + sub-form — use the total)
+    if (!existing || amt > existing.numericAmount) {
+      map.set(key, { entry: n, numericAmount: amt });
+    }
+  }
+
+  return Array.from(map.values()).map(v => v.entry);
+}
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
@@ -397,9 +497,20 @@ export const storage = {
   },
 
   async saveLabelNutrients(id: number, nutrients: object[]): Promise<void> {
+    // Fetch existing nutrients so we can MERGE (not overwrite) for multi-photo labels
+    const { rows } = await pool.query(
+      `SELECT label_nutrients FROM prx_user_supplements WHERE id = $1`,
+      [id]
+    );
+    const existing: any[] = rows[0]?.label_nutrients ?? [];
+
+    // Merge: canonical key → keep entry with highest numeric amount
+    // This deduplicates the same nutrient appearing on two different label pages
+    const merged = mergeNutrients(existing, nutrients as any[]);
+
     await pool.query(
       `UPDATE prx_user_supplements SET label_nutrients = $1::jsonb WHERE id = $2`,
-      [JSON.stringify(nutrients), id]
+      [JSON.stringify(merged), id]
     );
   },
 };

@@ -1,11 +1,20 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { registerAuthRoutes, requireAuth, type AuthRequest } from "./auth";
-import { storage } from "./storage";
+import { storage, canonicalizeNutrient } from "./storage";
 import type { Response } from "express";
 import * as fs from "fs";
 import * as path from "path";
 import * as crypto from "crypto";
+
+// Normalise unit strings — strip DFE / NE / RAE qualifiers so aggregation stays
+// in consistent units. "mcg DFE" and "mcg" are both just micrograms for our purposes.
+function normalizeUnit(unit: string): string {
+  return unit
+    .replace(/\s*(DFE|RAE|NE|ATE|TE|AT)\s*$/i, "")   // dietary equivalents
+    .replace(/^IU$/i, "IU")                             // keep IU as-is
+    .trim();
+}
 
 export async function registerRoutes(httpServer: Server, app: Express) {
   registerAuthRoutes(app);
@@ -386,7 +395,7 @@ CRITICAL RULE on hasSplitDose — read carefully:
 
     console.log(`[scan-label] id=${id} name="${supp.name}" payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
 
-    const PPLX_PROMPT = `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no explanation, no code fences.
+    const PPLX_PROMPT = `Extract nutrients from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
 
 Return exactly:
 {
@@ -397,7 +406,11 @@ Return exactly:
   ]
 }
 
-List every row from the Supplement Facts panel. Use exact amounts. Set dailyValue to "" if not listed.`;
+RULES:
+- Include every row from the Supplement Facts panel with exact amounts.
+- Use the SIMPLE unit (e.g. "mcg" not "mcg DFE", "mg" not "mg NE").
+- When a nutrient has BOTH a total amount AND a sub-form (e.g. "Folate 400 mcg" with indented "(240 mcg folic acid)"), output ONLY the top-level total row — skip the indented sub-form.
+- Set dailyValue to "" if not listed.`;
 
     function extractJson(raw: string): any {
       const start = raw.indexOf("{");
@@ -481,17 +494,23 @@ List every nutrient/ingredient from the Supplement Facts panel with exact label 
       const supplements = await storage.getUserSupplements(req.userId!);
       if (supplements.length === 0) return res.status(400).json({ error: "No supplements logged" });
 
-      // Aggregate nutrients from scanned labels
-      const nutrientMap: Record<string, { amount: number; unit: string; sources: string[] }> = {};
+      // Aggregate nutrients from scanned labels using canonical keys to prevent double-counting
+      // e.g. "Folate (as 5-MTHF)" + "Folic Acid" from the same/different products → one "Folate" entry
+      type NutAgg = { amount: number; unit: string; sources: string[]; displayName: string };
+      const nutrientMap: Record<string, NutAgg> = {};
       let unscanned: typeof supplements = [];
 
       for (const s of supplements) {
         const labelNutrients = (s as any).labelNutrients as { name: string; amount: string; unit: string }[] | null;
         if (labelNutrients && labelNutrients.length > 0) {
           for (const n of labelNutrients) {
-            const key = n.name.toLowerCase();
+            const key = canonicalizeNutrient(n.name);
             const amt = parseFloat(n.amount) || 0;
-            if (!nutrientMap[key]) nutrientMap[key] = { amount: 0, unit: n.unit, sources: [] };
+            if (!nutrientMap[key]) {
+              // Capitalise the canonical key as display name
+              const display = key.split(" ").map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+              nutrientMap[key] = { amount: 0, unit: normalizeUnit(n.unit), sources: [], displayName: display };
+            }
             nutrientMap[key].amount += amt;
             if (!nutrientMap[key].sources.includes(s.name)) nutrientMap[key].sources.push(s.name);
           }
@@ -500,8 +519,8 @@ List every nutrient/ingredient from the Supplement Facts panel with exact label 
         }
       }
 
-      const scannedNutrients = Object.entries(nutrientMap).map(([key, v]) => ({
-        name: key.split(' ').map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+      const scannedNutrients = Object.entries(nutrientMap).map(([, v]) => ({
+        name: v.displayName,
         totalDailyDose: v.amount % 1 === 0 ? String(v.amount) : v.amount.toFixed(2),
         unit: v.unit,
         sources: v.sources,
