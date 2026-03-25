@@ -308,7 +308,6 @@ function SupplementsTab({ userId }: { userId: number }) {
   const [scanningId, setScanningId] = useState<number | null>(null);
   const labelInputRef = useRef<HTMLInputElement>(null);
   const scanTargetIdRef = useRef<number | null>(null);
-  const forceRescanRef = useRef<boolean>(false);
 
   const { data: supplements, refetch } = useQuery<UserSupplement[]>({
     queryKey: ["/api/supplements"],
@@ -413,9 +412,14 @@ function SupplementsTab({ userId }: { userId: number }) {
     finally { setLoadingNutrients(false); }
   }
 
-  function openLabelScanner(id: number, force = false) {
+  // mode: "normal"  = use cache if available
+  //       "merge"   = bypass cache, run AI, merge into existing (add another photo)
+  //       "force"   = bypass cache, run AI, replace existing (re-scan fresh)
+  const scanModeRef = useRef<"normal" | "merge" | "force">("normal");
+
+  function openLabelScanner(id: number, mode: "normal" | "merge" | "force" = "normal") {
     scanTargetIdRef.current = id;
-    forceRescanRef.current = force;
+    scanModeRef.current = mode;
     labelInputRef.current?.click();
   }
 
@@ -451,15 +455,18 @@ function SupplementsTab({ userId }: { userId: number }) {
     if (!file || !scanTargetIdRef.current) return;
     e.target.value = "";
     const id = scanTargetIdRef.current;
-    const force = forceRescanRef.current;
-    forceRescanRef.current = false;
+    const mode = scanModeRef.current;
+    scanModeRef.current = "normal";
     setScanningId(id);
     try {
       const base64 = await compressImage(file);
       const data = await apiRequest("POST", `/api/supplements/${id}/scan-label`, {
         imageBase64: base64,
         mimeType: "image/jpeg",
-        force,
+        // force=true: bypass cache + replace existing
+        // merge=true: bypass cache + keep merging into existing
+        force: mode === "force",
+        merge: mode === "merge",
       });
       if (data.error) throw new Error(data.error);
       refetch();
@@ -752,19 +759,19 @@ function SupplementsTab({ userId }: { userId: number }) {
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-52">
                     {!hasLabel(s) && (
-                      <DropdownMenuItem onClick={() => openLabelScanner(s.id)}>
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id, "normal")}>
                         <Camera className="w-3.5 h-3.5 mr-2" />
                         Scan label photo
                       </DropdownMenuItem>
                     )}
                     {hasLabel(s) && (<>
-                      <DropdownMenuItem onClick={() => openLabelScanner(s.id)}>
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id, "merge")}>
                         <Camera className="w-3.5 h-3.5 mr-2" />
                         Add another photo
                       </DropdownMenuItem>
-                      <DropdownMenuItem onClick={() => openLabelScanner(s.id, true)}>
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id, "force")}>
                         <RefreshCw className="w-3.5 h-3.5 mr-2" />
-                        Re-scan (force fresh)
+                        Re-scan (replace all)
                       </DropdownMenuItem>
                       <DropdownMenuSeparator />
                       <DropdownMenuItem

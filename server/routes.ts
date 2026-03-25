@@ -390,14 +390,19 @@ CRITICAL RULE on hasSplitDose — read carefully:
     const supp = supplements.find(s => s.id === id);
     if (!supp) return res.status(403).json({ error: "Access denied" });
 
-    const { imageBase64, mimeType, force } = req.body as { imageBase64: string; mimeType?: string; force?: boolean };
+    const { imageBase64, mimeType, force, merge } = req.body as { imageBase64: string; mimeType?: string; force?: boolean; merge?: boolean };
     if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
-    const slug = productSlug(supp.name);
-    console.log(`[scan-label] id=${id} slug="${slug}" force=${!!force} payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
+    // force = bypass cache + replace all existing label data
+    // merge = bypass cache + merge new scan into existing label data (add another photo)
+    // normal = use cache if available
+    const bypassCache = force || merge;
 
-    // ── Step 0: Cache hit ─────────────────────────────────────────────────────
-    if (!force) {
+    const slug = productSlug(supp.name);
+    console.log(`[scan-label] id=${id} slug="${slug}" mode=${force ? "force" : merge ? "merge" : "normal"} payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
+
+    // ── Step 0: Cache hit (normal mode only) ────────────────────────────────
+    if (!bypassCache) {
       const cached = await storage.getCachedProduct(slug);
       if (cached && Array.isArray(cached.nutrients) && cached.nutrients.length > 0) {
         console.log(`[scan-label] cache HIT for "${slug}" (scanned ${cached.scanCount}x before)`);
@@ -410,6 +415,11 @@ CRITICAL RULE on hasSplitDose — read carefully:
           scanCount: cached.scanCount,
         });
       }
+    }
+
+    // force mode: clear existing label data first so we get a clean slate
+    if (force) {
+      await storage.clearUserLabelNutrients(id);
     }
 
     const PPLX_PROMPT = `Extract nutrients from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
@@ -440,12 +450,12 @@ RULES:
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content }], max_tokens: 3000 }),
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content }], max_tokens: 4000 }),
       });
       if (!r.ok) { console.error(`[scan-label] pplx ${r.status}:`, await r.text()); return null; }
       const d = await r.json() as any;
       const raw: string = d.choices?.[0]?.message?.content || "";
-      console.log(`[scan-label] pplx raw (200 chars):`, raw.substring(0, 200));
+      console.log(`[scan-label] pplx raw (300 chars):`, raw.substring(0, 300));
       try { return extractJson(raw); } catch { return null; }
     }
 
@@ -468,12 +478,15 @@ RULES:
         { type: "image_url", image_url: { url: imageUrl } },
       ]);
 
-      // ── Step 3: Fallback — text-based web lookup by product name ─────────────
-      if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
-        console.log(`[scan-label] vision empty — falling back to text lookup for "${supp.name}"`);
-        parsed = await callPplx([{
+      // ── Step 3: Text lookup — always run when vision returns < 5 nutrients ──────
+      // Vision may only see part of the label; text search fills the gaps.
+      // Results are MERGED with whatever vision found, deduplication handled by mergeNutrients.
+      const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
+      if (visionCount < 5) {
+        console.log(`[scan-label] vision returned ${visionCount} nutrients — running text lookup to complete picture`);
+        const textParsed = await callPplx([{
           type: "text",
-          text: `Look up the exact supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+          text: `Look up the COMPLETE supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
 
 Return:
 {
@@ -484,8 +497,17 @@ Return:
   ]
 }
 
-Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total for each nutrient, skip indented sub-forms. Search iHerb, manufacturer website, or FDA databases for the real label data.`,
+IMPORTANT: Include ALL nutrients — every single row from the label. Do not truncate.
+Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total for each nutrient, skip indented sub-forms.
+Search iHerb, manufacturer website, Examine.com, or FDA databases for the real label data.`,
         }]);
+        if (textParsed && Array.isArray(textParsed.nutrients) && textParsed.nutrients.length > 0) {
+          // Merge: take best of vision + text (keeps higher amount per canonical key)
+          const { mergeNutrients } = await import("./storage");
+          const combined = mergeNutrients(parsed?.nutrients ?? [], textParsed.nutrients);
+          parsed = { ...(textParsed), nutrients: combined };
+          console.log(`[scan-label] after merge: ${combined.length} nutrients (vision:${visionCount} + text:${textParsed.nutrients.length})`);
+        }
       }
 
       // ── Cleanup temp image ───────────────────────────────────────────────────

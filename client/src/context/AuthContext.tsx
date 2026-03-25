@@ -18,10 +18,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch { return null; }
   });
   const [token, setToken] = useState<string | null>(() => {
-    try { return localStorage.getItem("prx_token") || sessionStorage.getItem("prx_token"); } catch { return null; }
+    try {
+      // Set token synchronously so the first query fired by TanStack Query
+      // already has the Authorization header — avoids needing re-login after refresh
+      const t = localStorage.getItem("prx_token") || sessionStorage.getItem("prx_token") || null;
+      if (t) setAuthToken(t);
+      return t;
+    } catch { return null; }
   });
   const [isLoading, setIsLoading] = useState(false);
 
+  // Keep authToken in sync whenever token state changes (login/logout)
   useEffect(() => { setAuthToken(token); }, [token]);
 
   const persist = (t: string, u: AuthUser) => {
