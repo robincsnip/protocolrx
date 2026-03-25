@@ -419,78 +419,22 @@ CRITICAL RULE on hasSplitDose — read carefully:
       return JSON.parse(raw.slice(start, end + 1));
     }
 
-    // Real vision OCR: GPT-5.4 via the Perplexity Agent API (/v1/responses).
-    // Image URL is embedded in the text prompt — GPT-5.4 fetches and reads it directly.
-    async function callVision(imageUrl: string): Promise<any | null> {
-      const prompt = `You are a document scanner reading a supplement label photograph.
-READ ONLY what is literally printed and visible in this image.
-DO NOT add, infer, or use any outside knowledge or web data about this product.
-If you cannot clearly read a value, omit that row — do not guess.
-
-SCAN THE ENTIRE IMAGE from top to bottom. Do not stop after a few rows.
-Every single line in the Supplement Facts panel must be included.
-
-RESPOND ONLY WITH VALID JSON — no markdown, no code fences, nothing else.
-
-{
-  "productName": "exact product name visible in image",
-  "servingSize": "serving size visible in image",
-  "nutrients": [
-    { "name": "Vitamin D3", "amount": "2000", "unit": "IU", "dailyValue": "500%" }
-  ]
-}
-
-RULES:
-- Include EVERY row from the Supplement Facts panel — scan all the way to the bottom.
-- Use the SIMPLE unit ("mcg" not "mcg DFE", "mg" not "mg NE").
-- When a nutrient has both a total and an indented sub-form, output ONLY the top-level total row.
-- Set dailyValue to "" if not listed on the label.
-- If the image shows no supplement facts panel at all, return {"productName":"","servingSize":"","nutrients":[]}
-
-Image: ${imageUrl}`;
-
-      const r = await fetch("https://api.perplexity.ai/v1/responses", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "openai/gpt-5.4",
-          input: [{ role: "user", content: prompt }],
-          max_output_tokens: 8000,
-        }),
-      });
-      if (!r.ok) { console.error(`[scan-label] vision ${r.status}:`, await r.text()); return null; }
-      const d = await r.json() as any;
-      const raw: string = d.output?.[0]?.content?.[0]?.text || "";
-      console.log(`[scan-label] vision raw (500 chars):`, raw.substring(0, 500));
-      try { return extractJson(raw); } catch { return null; }
-    }
-
-    // Text search fallback: used ONLY when vision returns 0 AND no existing data
-    async function callTextSearch(name: string, dose: string, unit: string): Promise<any | null> {
+    async function callPplx(content: any[], useVision = false): Promise<any | null> {
+      const body: any = {
+        model: "sonar-pro",
+        messages: [{ role: "user", content }],
+        max_tokens: 4000,
+      };
+      if (useVision) body.web_search_options = { search_context_size: "low" };
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "sonar-pro",
-          messages: [{ role: "user", content: `Look up the COMPLETE supplement facts label for "${name}"${dose ? ` ${dose}${unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
-
-Return:
-{
-  "productName": "exact product name",
-  "servingSize": "serving size from label",
-  "nutrients": [
-    { "name": "nutrient name", "amount": "amount", "unit": "unit", "dailyValue": "% or empty string" }
-  ]
-}
-
-Include ALL nutrients from the label. Use SIMPLE units ("mcg" not "mcg DFE"). Skip indented sub-forms.
-Search iHerb, manufacturer website, or FDA databases for the real label data.` }],
-          max_tokens: 4000,
-        }),
+        body: JSON.stringify(body),
       });
-      if (!r.ok) { return null; }
+      if (!r.ok) { console.error(`[scan-label] pplx ${r.status}:`, await r.text()); return null; }
       const d = await r.json() as any;
       const raw: string = d.choices?.[0]?.message?.content || "";
+      console.log(`[scan-label] raw (300 chars):`, raw.substring(0, 300));
       try { return extractJson(raw); } catch { return null; }
     }
 
@@ -504,37 +448,70 @@ Search iHerb, manufacturer website, or FDA databases for the real label data.` }
       const imageUrl = `${appUrl}/api/supplements/label-img/${token}`;
       console.log(`[scan-label] image stored in DB, serving at ${imageUrl}`);
 
-      // ── Step 2: Vision call — strict image-only OCR ────────────────────────
-      let parsed = await callVision(imageUrl);
-      if (parsed?.nutrients) parsed.nutrients = deduplicateScan(parsed.nutrients);
+      // ── Step 2: Vision call (sonar-pro + image URL) ─────────────────────
+      const LABEL_PROMPT = `Extract every nutrient from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
 
-      const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
-      console.log(`[scan-label] vision returned ${visionCount} nutrients`);
+Return:
+{
+  "productName": "exact product name from label",
+  "servingSize": "serving size from label",
+  "nutrients": [
+    { "name": "Vitamin D3", "amount": "2000", "unit": "IU", "dailyValue": "500%" }
+  ]
+}
+
+Rules: include every row in the Supplement Facts panel; use simple units ("mcg" not "mcg DFE"); skip indented sub-forms; set dailyValue to "" if not listed.`;
+
+      const visionParsed = await callPplx([
+        { type: "text", text: LABEL_PROMPT },
+        { type: "image_url", image_url: { url: imageUrl } },
+      ], true);
 
       // ── Cleanup temp image from DB ───────────────────────────────────
       await storage.deleteTempImage(token).catch(() => {});
 
-      // ── Step 3 (last resort): text search ONLY when vision returned 0 rows  ───
-      // AND there is no existing label data (i.e. this is the first scan and the
-      // photo was unreadable). Never use text search when merging a second photo
-      // — it would mix internet guesses into real label data.
-      if (visionCount === 0) {
-        const hasExisting = Array.isArray((supp as any).labelNutrients) && (supp as any).labelNutrients.length > 0;
-        if (!hasExisting) {
-          console.log(`[scan-label] vision returned 0, no existing data — text search fallback for "${supp.name}"`);
-          const textParsed = await callTextSearch(supp.name, supp.dose, supp.unit);
-          if (textParsed?.nutrients?.length > 0) {
-            parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
-            console.log(`[scan-label] text search returned ${parsed.nutrients.length} nutrients`);
-          }
-        } else {
-          console.log(`[scan-label] vision returned 0 but existing data present — skipping text search to avoid overwrite`);
-        }
+      const visionNutrients: any[] = (visionParsed?.nutrients ?? []).map((n: any) => ({ ...n, source: "photo" }));
+      const visionCount = visionNutrients.length;
+      console.log(`[scan-label] vision returned ${visionCount} nutrients`);
+
+      // ── Step 3: Text search — always run, fills gaps vision missed ──────────
+      // Tagged source="search" so the UI can warn the user these values
+      // came from the internet and may not match their specific product version.
+      const textParsed = await callPplx([{ type: "text", content: undefined, text:
+        `Look up the COMPLETE supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+
+Return:
+{
+  "productName": "exact product name",
+  "servingSize": "serving size from label",
+  "nutrients": [
+    { "name": "nutrient name", "amount": "amount", "unit": "unit", "dailyValue": "% or empty string" }
+  ]
+}
+
+Include ALL nutrients from the label. Use SIMPLE units ("mcg" not "mcg DFE"). Skip indented sub-forms. Search iHerb, manufacturer website, or FDA databases for the real label data.` }]);
+
+      const searchNutrients: any[] = (textParsed?.nutrients ?? []).map((n: any) => ({ ...n, source: "search" }));
+      console.log(`[scan-label] text search returned ${searchNutrients.length} nutrients`);
+
+      // Merge: vision wins for any key it found; search fills the rest
+      const merged = mergeNutrients(
+        deduplicateScan(searchNutrients),  // base: internet data (lower priority)
+        deduplicateScan(visionNutrients),  // incoming: photo data wins
+      );
+
+      if (merged.length === 0) {
+        return res.status(500).json({ error: "Could not extract label data. Please check the supplement name is correct, or add nutrients manually using the Edit button." });
       }
 
-      if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
-        return res.status(500).json({ error: "Could not read any nutrients from this photo. Try a clearer, well-lit shot of the Supplement Facts panel." });
-      }
+      const fromSearch = visionCount === 0;
+      const parsed = {
+        productName: visionParsed?.productName || textParsed?.productName || supp.name,
+        servingSize: visionParsed?.servingSize || textParsed?.servingSize || null,
+        nutrients: merged,
+        fromSearch, // true = no photo data, all from internet
+        visionCount, // how many came from the actual photo
+      };
 
       // ── Step 4: Save to user row, then write the MERGED result to cache ─────
       // saveLabelNutrients merges the new scan with existing DB data.

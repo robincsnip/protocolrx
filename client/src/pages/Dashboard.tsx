@@ -480,8 +480,14 @@ function SupplementsTab({ userId }: { userId: number }) {
       queryClient.invalidateQueries({ queryKey: ["/api/supplements"] });
       const src = data.fromCache
         ? `Retrieved from product cache (⚡ instant)`
-        : `${data.nutrients?.length ?? 0} nutrients extracted`;
-      toast({ title: "Label scanned", description: `${src} — ${data.productName || "label"}.` });
+        : data.fromSearch
+          ? `${data.nutrients?.length ?? 0} nutrients from web search — photo unreadable. Values may not match your product version exactly. Use Edit to correct any wrong values.`
+          : `${data.visionCount ?? data.nutrients?.length ?? 0} from photo${data.nutrients?.length > data.visionCount ? `, ${data.nutrients.length - data.visionCount} filled from web search` : ""}. Web search values are marked — verify and edit if needed.`;
+      toast({
+        title: data.fromSearch ? "Web search only — verify values" : "Label scanned",
+        description: `${src}`,
+        variant: data.fromSearch ? "destructive" : "default",
+      });
     } catch (e: any) {
       toast({ title: "Scan failed", description: e.message, variant: "destructive" });
     } finally { setScanningId(null); }
@@ -541,6 +547,14 @@ function SupplementsTab({ userId }: { userId: number }) {
     high: "text-red-400 bg-red-500/10 border-red-500/20" };
 
   const hasLabel = (s: UserSupplement) => Array.isArray((s as any).labelNutrients) && (s as any).labelNutrients.length > 0;
+  const hasWebSearchNutrients = (s: UserSupplement) => {
+    const n = (s as any).labelNutrients as LabelNutrient[] | null;
+    return Array.isArray(n) && n.some(x => !x.source || x.source === "search");
+  };
+  const hasPhotoNutrients = (s: UserSupplement) => {
+    const n = (s as any).labelNutrients as LabelNutrient[] | null;
+    return Array.isArray(n) && n.some(x => x.source === "photo");
+  };
 
   const isSaving = addM.isPending || editM.isPending;
 
@@ -760,7 +774,18 @@ function SupplementsTab({ userId }: { userId: number }) {
               </div>
               <div className="w-px h-8 bg-border/60 shrink-0" />
               <div className="flex-1 min-w-0">
-                <p className="text-sm font-semibold text-foreground leading-snug">{s.name}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-sm font-semibold text-foreground leading-snug">{s.name}</p>
+                  {hasLabel(s) && !hasWebSearchNutrients(s) && (
+                    <Camera className="w-3 h-3 text-emerald-400 shrink-0" title="Nutrients verified from photo" />
+                  )}
+                  {hasWebSearchNutrients(s) && !hasPhotoNutrients(s) && (
+                    <span title="All values from web search — tap camera to scan label" className="text-[9px] font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-1 py-0.5 shrink-0">web</span>
+                  )}
+                  {hasWebSearchNutrients(s) && hasPhotoNutrients(s) && (
+                    <span title="Some values from web search — verify in editor" className="text-[9px] font-medium text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-1 py-0.5 shrink-0">partial</span>
+                  )}
+                </div>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {s.frequency}{s.notes ? ` · ${s.notes}` : ""}
                 </p>
@@ -837,25 +862,41 @@ function SupplementsTab({ userId }: { userId: number }) {
               <div className="border-t border-border/40 bg-muted/20 px-4 py-3 space-y-2">
                 <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Edit nutrients — {s.name}</p>
                 <div className="space-y-1.5">
+                {/* Legend */}
+                <div className="flex items-center gap-3 mb-2">
+                  <span className="flex items-center gap-1 text-[10px] text-emerald-400"><Camera className="w-3 h-3" /> photo</span>
+                  <span className="flex items-center gap-1 text-[10px] text-amber-400"><Zap className="w-3 h-3" /> web search — verify</span>
+                  <span className="flex items-center gap-1 text-[10px] text-muted-foreground"><Pencil className="w-3 h-3" /> manual</span>
+                </div>
                   {editingRows.map((row, i) => (
                     <div key={i} className="flex items-center gap-2">
+                      {/* Source indicator */}
+                      <div className="shrink-0 w-4">
+                        {row.source === "photo" && <Camera className="w-3 h-3 text-emerald-400" title="From photo" />}
+                        {(row.source === "search" || !row.source) && <Zap className="w-3 h-3 text-amber-400" title="From web search — verify" />}
+                        {row.source === "manual" && <Pencil className="w-3 h-3 text-muted-foreground" title="Manually entered" />}
+                      </div>
                       <input
-                        className="flex-1 min-w-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-violet-500/60"
+                        className={`flex-1 min-w-0 bg-background border rounded-lg px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none ${
+                          (row.source === "search" || !row.source) ? "border-amber-500/40 focus:border-amber-500/70" : "border-border/60 focus:border-violet-500/60"
+                        }`}
                         placeholder="Nutrient name"
                         value={row.name}
-                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, name: e.target.value } : r))}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, name: e.target.value, source: "manual" } : r))}
                       />
                       <input
-                        className="w-20 shrink-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground text-right focus:outline-none focus:border-violet-500/60"
+                        className={`w-20 shrink-0 bg-background border rounded-lg px-2.5 py-1.5 text-xs text-foreground text-right focus:outline-none ${
+                          (row.source === "search" || !row.source) ? "border-amber-500/40 focus:border-amber-500/70" : "border-border/60 focus:border-violet-500/60"
+                        }`}
                         placeholder="Amount"
                         value={row.amount}
-                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, amount: e.target.value } : r))}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, amount: e.target.value, source: "manual" } : r))}
                       />
                       <input
                         className="w-16 shrink-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:border-violet-500/60"
                         placeholder="Unit"
                         value={row.unit}
-                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, unit: e.target.value } : r))}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, unit: e.target.value, source: "manual" } : r))}
                       />
                       <button
                         onClick={() => setEditingRows(rows => rows.filter((_, j) => j !== i))}
