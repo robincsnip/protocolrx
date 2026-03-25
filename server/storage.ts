@@ -59,6 +59,19 @@ const ALIAS_MAP: [RegExp, string][] = [
   [/\bomega.?3\b/, "omega-3"],
 ];
 
+/**
+ * Produce a stable slug from a product name for cache keying.
+ * "Doctor's Best High Absorption Magnesium 200 mg" → "doctors best high absorption magnesium 200 mg"
+ */
+export function productSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[''`]/g, "")          // apostrophes
+    .replace(/[^a-z0-9\s]/g, " ")   // non-alphanumeric → space
+    .replace(/\s+/g, " ")           // collapse whitespace
+    .trim();
+}
+
 export function canonicalizeNutrient(name: string): string {
   // Step 1: lower-case & trim
   let s = name.toLowerCase().trim();
@@ -188,6 +201,19 @@ async function initSchema() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
     ALTER TABLE prx_user_supplements ADD COLUMN IF NOT EXISTS label_nutrients JSONB;
+
+    -- Shared product label cache — one row per unique product
+    -- name_slug is a normalised key (lower-case, stripped punctuation)
+    CREATE TABLE IF NOT EXISTS prx_product_cache (
+      id SERIAL PRIMARY KEY,
+      name_slug TEXT NOT NULL UNIQUE,
+      product_name TEXT NOT NULL,
+      serving_size TEXT,
+      nutrients JSONB NOT NULL DEFAULT '[]',
+      scan_count INTEGER NOT NULL DEFAULT 1,
+      flagged BOOLEAN NOT NULL DEFAULT false,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
   `);
   console.log("[prx] Schema ready");
 }
@@ -495,6 +521,53 @@ export const storage = {
   async deleteUserSupplement(id: number): Promise<void> {
     await pool.query(`DELETE FROM prx_user_supplements WHERE id = $1`, [id]);
   },
+
+  // ── Product cache ─────────────────────────────────────────────────────────────────
+
+  async getCachedProduct(slug: string): Promise<{ productName: string; servingSize: string | null; nutrients: object[]; scanCount: number } | null> {
+    const { rows } = await pool.query(
+      `SELECT product_name, serving_size, nutrients, scan_count FROM prx_product_cache WHERE name_slug = $1 AND flagged = false`,
+      [slug]
+    );
+    if (!rows[0]) return null;
+    return {
+      productName: rows[0].product_name,
+      servingSize: rows[0].serving_size ?? null,
+      nutrients: rows[0].nutrients ?? [],
+      scanCount: rows[0].scan_count,
+    };
+  },
+
+  async upsertCachedProduct(slug: string, productName: string, servingSize: string | null, nutrients: object[]): Promise<void> {
+    await pool.query(
+      `INSERT INTO prx_product_cache (name_slug, product_name, serving_size, nutrients, scan_count, flagged, updated_at)
+       VALUES ($1, $2, $3, $4::jsonb, 1, false, NOW())
+       ON CONFLICT (name_slug) DO UPDATE SET
+         product_name = EXCLUDED.product_name,
+         serving_size = EXCLUDED.serving_size,
+         nutrients    = EXCLUDED.nutrients,
+         scan_count   = prx_product_cache.scan_count + 1,
+         flagged      = false,
+         updated_at   = NOW()`,
+      [slug, productName, servingSize, JSON.stringify(nutrients)]
+    );
+  },
+
+  async flagCachedProduct(slug: string): Promise<void> {
+    await pool.query(
+      `UPDATE prx_product_cache SET flagged = true, updated_at = NOW() WHERE name_slug = $1`,
+      [slug]
+    );
+  },
+
+  async clearUserLabelNutrients(supplementId: number): Promise<void> {
+    await pool.query(
+      `UPDATE prx_user_supplements SET label_nutrients = NULL WHERE id = $1`,
+      [supplementId]
+    );
+  },
+
+  // ── Label nutrients (per user supplement row) ─────────────────────────────────
 
   async saveLabelNutrients(id: number, nutrients: object[]): Promise<void> {
     // Fetch existing nutrients so we can MERGE (not overwrite) for multi-photo labels

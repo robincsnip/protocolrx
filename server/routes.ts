@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { registerAuthRoutes, requireAuth, type AuthRequest } from "./auth";
-import { storage, canonicalizeNutrient } from "./storage";
+import { storage, canonicalizeNutrient, productSlug } from "./storage";
 import type { Response } from "express";
 import * as fs from "fs";
 import * as path from "path";
@@ -376,11 +376,11 @@ CRITICAL RULE on hasSplitDose — read carefully:
   // POST /api/supplements/:id/scan-label — label OCR + nutrient extraction
   //
   // Strategy:
-  //   1. Save the compressed image to /tmp so we can serve it at a public HTTPS URL
-  //   2. Pass that URL to sonar-pro vision (base64 data URIs return 500 from Perplexity)
-  //   3. Parse the JSON response
-  //   4. If vision fails or returns empty nutrients, fall back to text-based lookup by product name
-  //   5. Store the nutrients on the supplement row
+  //   0. Check product cache (skip AI entirely if hit + not force-refresh)
+  //   1. Save image to /tmp, serve at public HTTPS URL
+  //   2. sonar-pro vision call with that URL
+  //   3. Fallback: text-based lookup by supplement name
+  //   4. Write result to user's label_nutrients AND to shared product cache
   app.post("/api/supplements/:id/scan-label", requireAuth, async (req: AuthRequest, res: Response) => {
     const apiKey = process.env.PERPLEXITY_API_KEY;
     if (!apiKey) return res.status(500).json({ error: "AI not configured" });
@@ -390,10 +390,27 @@ CRITICAL RULE on hasSplitDose — read carefully:
     const supp = supplements.find(s => s.id === id);
     if (!supp) return res.status(403).json({ error: "Access denied" });
 
-    const { imageBase64, mimeType } = req.body as { imageBase64: string; mimeType?: string };
+    const { imageBase64, mimeType, force } = req.body as { imageBase64: string; mimeType?: string; force?: boolean };
     if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
-    console.log(`[scan-label] id=${id} name="${supp.name}" payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
+    const slug = productSlug(supp.name);
+    console.log(`[scan-label] id=${id} slug="${slug}" force=${!!force} payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
+
+    // ── Step 0: Cache hit ─────────────────────────────────────────────────────
+    if (!force) {
+      const cached = await storage.getCachedProduct(slug);
+      if (cached && Array.isArray(cached.nutrients) && cached.nutrients.length > 0) {
+        console.log(`[scan-label] cache HIT for "${slug}" (scanned ${cached.scanCount}x before)`);
+        await storage.saveLabelNutrients(id, cached.nutrients);
+        return res.json({
+          productName: cached.productName,
+          servingSize: cached.servingSize,
+          nutrients: cached.nutrients,
+          fromCache: true,
+          scanCount: cached.scanCount,
+        });
+      }
+    }
 
     const PPLX_PROMPT = `Extract nutrients from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
 
@@ -439,7 +456,6 @@ RULES:
       if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
       const filePath = path.join(tmpDir, `${token}.jpg`);
       fs.writeFileSync(filePath, Buffer.from(imageBase64, "base64"));
-      // Expire in 5 minutes
       tempImages.set(token, { filePath, expires: Date.now() + 5 * 60 * 1000 });
 
       const appUrl = process.env.APP_URL || "https://protocolrx-production.up.railway.app";
@@ -454,7 +470,7 @@ RULES:
 
       // ── Step 3: Fallback — text-based web lookup by product name ─────────────
       if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
-        console.log(`[scan-label] vision returned empty/null — falling back to text lookup for "${supp.name}"`);
+        console.log(`[scan-label] vision empty — falling back to text lookup for "${supp.name}"`);
         parsed = await callPplx([{
           type: "text",
           text: `Look up the exact supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
@@ -468,7 +484,7 @@ Return:
   ]
 }
 
-List every nutrient/ingredient from the Supplement Facts panel with exact label amounts. Search iHerb, manufacturer website, or FDA databases for the real label data.`,
+Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total for each nutrient, skip indented sub-forms. Search iHerb, manufacturer website, or FDA databases for the real label data.`,
         }]);
       }
 
@@ -476,16 +492,51 @@ List every nutrient/ingredient from the Supplement Facts panel with exact label 
       try { fs.unlinkSync(filePath); } catch { /* ignore */ }
       tempImages.delete(token);
 
-      if (!parsed || !Array.isArray(parsed.nutrients)) {
+      if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
         return res.status(500).json({ error: "Could not extract label data. Try a clearer photo or check the supplement name." });
       }
 
-      await storage.saveLabelNutrients(id, parsed.nutrients);
-      res.json(parsed);
+      // ── Step 4: Save to user row + shared product cache ───────────────────────
+      await Promise.all([
+        storage.saveLabelNutrients(id, parsed.nutrients),
+        storage.upsertCachedProduct(slug, parsed.productName || supp.name, parsed.servingSize || null, parsed.nutrients),
+      ]);
+      res.json({ ...parsed, fromCache: false });
     } catch (e: any) {
       console.error("[scan-label] unexpected error:", e);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // DELETE /api/supplements/:id/label — clear a user's stored label nutrients for one supplement
+  app.delete("/api/supplements/:id/label", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const supplements = await storage.getUserSupplements(req.userId!);
+      if (!supplements.find(s => s.id === id)) return res.status(403).json({ error: "Access denied" });
+      await storage.clearUserLabelNutrients(id);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
+  });
+
+  // POST /api/supplements/cache/flag — flag a cached product as incorrect
+  // The cache entry is marked flagged=true; next scan for this product will re-fetch from AI
+  app.post("/api/supplements/cache/flag", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const { supplementId } = req.body as { supplementId: number };
+      if (!supplementId) return res.status(400).json({ error: "supplementId required" });
+      const supplements = await storage.getUserSupplements(req.userId!);
+      const supp = supplements.find(s => s.id === supplementId);
+      if (!supp) return res.status(403).json({ error: "Access denied" });
+      const slug = productSlug(supp.name);
+      // Flag the shared cache + clear user's personal label data so they get a fresh scan
+      await Promise.all([
+        storage.flagCachedProduct(slug),
+        storage.clearUserLabelNutrients(supplementId),
+      ]);
+      console.log(`[cache] flagged slug="${slug}" by userId=${req.userId}`);
+      res.json({ ok: true, message: "Cache cleared for this product. Next scan will re-fetch label data." });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // POST /api/supplements/nutrients — combine stored label nutrients from all scanned supplements

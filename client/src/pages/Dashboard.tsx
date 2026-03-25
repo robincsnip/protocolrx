@@ -2,7 +2,11 @@ import { useState, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { FlaskConical, CheckCircle, AlertTriangle, Bell, Plus, ChevronRight,
   Zap, Play, Pause, XCircle, LogOut, Activity, Loader2,
-  ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check, Camera, ScanLine } from "lucide-react";
+  ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check, Camera, ScanLine,
+  RefreshCw, Flag, XSquare, ChevronDown } from "lucide-react";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
@@ -304,6 +308,7 @@ function SupplementsTab({ userId }: { userId: number }) {
   const [scanningId, setScanningId] = useState<number | null>(null);
   const labelInputRef = useRef<HTMLInputElement>(null);
   const scanTargetIdRef = useRef<number | null>(null);
+  const forceRescanRef = useRef<boolean>(false);
 
   const { data: supplements, refetch } = useQuery<UserSupplement[]>({
     queryKey: ["/api/supplements"],
@@ -408,8 +413,9 @@ function SupplementsTab({ userId }: { userId: number }) {
     finally { setLoadingNutrients(false); }
   }
 
-  function openLabelScanner(id: number) {
+  function openLabelScanner(id: number, force = false) {
     scanTargetIdRef.current = id;
+    forceRescanRef.current = force;
     labelInputRef.current?.click();
   }
 
@@ -432,7 +438,6 @@ function SupplementsTab({ userId }: { userId: number }) {
         const ctx = canvas.getContext("2d");
         if (!ctx) return reject(new Error("Canvas not supported"));
         ctx.drawImage(img, 0, 0, width, height);
-        // Strip data: prefix — we only want the raw base64 bytes
         const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
         resolve(dataUrl.split(",")[1]);
       };
@@ -446,21 +451,49 @@ function SupplementsTab({ userId }: { userId: number }) {
     if (!file || !scanTargetIdRef.current) return;
     e.target.value = "";
     const id = scanTargetIdRef.current;
+    const force = forceRescanRef.current;
+    forceRescanRef.current = false;
     setScanningId(id);
     try {
-      // Compress before encoding — phone photos are 5-15 MB; we need <10 MB total payload
       const base64 = await compressImage(file);
       const data = await apiRequest("POST", `/api/supplements/${id}/scan-label`, {
         imageBase64: base64,
         mimeType: "image/jpeg",
+        force,
       });
       if (data.error) throw new Error(data.error);
       refetch();
-      toast({ title: "Label scanned", description: `${data.nutrients?.length ?? 0} nutrients extracted from ${data.productName || "label"}.` });
+      queryClient.invalidateQueries({ queryKey: ["/api/supplements"] });
+      const src = data.fromCache
+        ? `Retrieved from product cache (⚡ instant)`
+        : `${data.nutrients?.length ?? 0} nutrients extracted`;
+      toast({ title: "Label scanned", description: `${src} — ${data.productName || "label"}.` });
     } catch (e: any) {
       toast({ title: "Scan failed", description: e.message, variant: "destructive" });
     } finally { setScanningId(null); }
   }
+
+  const flagCacheMutation = useMutation({
+    mutationFn: (supplementId: number) =>
+      apiRequest("POST", "/api/supplements/cache/flag", { supplementId }),
+    onSuccess: () => {
+      refetch();
+      queryClient.invalidateQueries({ queryKey: ["/api/supplements"] });
+      toast({ title: "Reported", description: "Label data cleared. Re-scan to get fresh data." });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  const clearLabelMutation = useMutation({
+    mutationFn: (supplementId: number) =>
+      apiRequest("DELETE", `/api/supplements/${supplementId}/label`),
+    onSuccess: () => {
+      refetch();
+      queryClient.invalidateQueries({ queryKey: ["/api/supplements"] });
+      toast({ title: "Cleared", description: "Your personal label data has been removed." });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
 
   async function runAnalysis() {
     setAnalysing(true); setAnalysis(null);
@@ -700,21 +733,57 @@ function SupplementsTab({ userId }: { userId: number }) {
                 </p>
               </div>
               <div className="flex items-center gap-1 shrink-0">
-                {/* Label scan button — green if scanned, grey if not */}
-                <button
-                  onClick={() => openLabelScanner(s.id)}
-                  disabled={scanningId === s.id}
-                  title={hasLabel(s) ? "Label scanned — click to re-scan" : "Scan supplement label"}
-                  className={`p-1.5 rounded-lg transition-colors ${
-                    hasLabel(s)
-                      ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10"
-                      : "text-muted-foreground hover:text-sky-400 hover:bg-sky-500/10"
-                  }`}
-                >
-                  {scanningId === s.id
-                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    : <Camera className="w-3.5 h-3.5" />}
-                </button>
+                {/* Label scan dropdown */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      disabled={scanningId === s.id}
+                      title={hasLabel(s) ? "Label scanned — click for options" : "Scan supplement label"}
+                      className={`p-1.5 rounded-lg transition-colors ${
+                        hasLabel(s)
+                          ? "text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10"
+                          : "text-muted-foreground hover:text-sky-400 hover:bg-sky-500/10"
+                      }`}
+                    >
+                      {scanningId === s.id
+                        ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : <Camera className="w-3.5 h-3.5" />}
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-52">
+                    {!hasLabel(s) && (
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id)}>
+                        <Camera className="w-3.5 h-3.5 mr-2" />
+                        Scan label photo
+                      </DropdownMenuItem>
+                    )}
+                    {hasLabel(s) && (<>
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id)}>
+                        <Camera className="w-3.5 h-3.5 mr-2" />
+                        Add another photo
+                      </DropdownMenuItem>
+                      <DropdownMenuItem onClick={() => openLabelScanner(s.id, true)}>
+                        <RefreshCw className="w-3.5 h-3.5 mr-2" />
+                        Re-scan (force fresh)
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="text-amber-400 focus:text-amber-300"
+                        onClick={() => flagCacheMutation.mutate(s.id)}
+                      >
+                        <Flag className="w-3.5 h-3.5 mr-2" />
+                        Report incorrect data
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        className="text-destructive focus:text-destructive"
+                        onClick={() => clearLabelMutation.mutate(s.id)}
+                      >
+                        <XSquare className="w-3.5 h-3.5 mr-2" />
+                        Clear my label data
+                      </DropdownMenuItem>
+                    </>)}
+                  </DropdownMenuContent>
+                </DropdownMenu>
                 <button onClick={() => startEdit(s)}
                   className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-accent transition-colors">
                   <Pencil className="w-3.5 h-3.5" />
