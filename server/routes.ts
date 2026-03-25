@@ -524,12 +524,19 @@ Search iHerb, manufacturer website, Examine.com, or FDA databases for the real l
         return res.status(500).json({ error: "Could not extract label data. Try a clearer photo or check the supplement name." });
       }
 
-      // ── Step 4: Save to user row + shared product cache ───────────────────────
-      await Promise.all([
-        storage.saveLabelNutrients(id, parsed.nutrients),
-        storage.upsertCachedProduct(slug, parsed.productName || supp.name, parsed.servingSize || null, parsed.nutrients),
-      ]);
-      res.json({ ...parsed, fromCache: false });
+      // ── Step 4: Save to user row, then write the MERGED result to cache ─────
+      // saveLabelNutrients merges the new scan with existing DB data.
+      // We then read back the merged result so the cache also reflects the full picture,
+      // not just this one scan.
+      await storage.saveLabelNutrients(id, parsed.nutrients);
+
+      // Read the now-merged label data from DB to cache the complete set
+      const updatedSupps = await storage.getUserSupplements(req.userId!);
+      const updatedSupp = updatedSupps.find(s => s.id === id);
+      const mergedNutrients = (updatedSupp as any)?.labelNutrients ?? parsed.nutrients;
+      await storage.upsertCachedProduct(slug, parsed.productName || supp.name, parsed.servingSize || null, mergedNutrients);
+
+      res.json({ ...parsed, nutrients: mergedNutrients, fromCache: false });
     } catch (e: any) {
       console.error("[scan-label] unexpected error:", e);
       res.status(500).json({ error: e.message });

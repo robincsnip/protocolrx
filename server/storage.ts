@@ -92,24 +92,28 @@ interface LabelNutrient { name: string; amount: string; unit: string; dailyValue
 /**
  * Merge two arrays of label nutrients for multi-photo scanning.
  *
- * Strategy: INCOMING WINS.
- * - If a nutrient key appears in both arrays, the incoming value replaces existing.
- *   (The new photo is more deliberate/recent than whatever was stored before.)
- * - If a nutrient key only appears in existing, it is kept.
- * - If a nutrient key only appears in incoming, it is added.
+ * Strategy: EXISTING WINS (additive-only).
+ * - If a nutrient key already exists, keep the existing value unchanged.
+ * - If a nutrient key only appears in incoming, add it.
  *
- * This means scanning a second photo of the same label correctly adds new rows
- * and corrects any misread values from the first scan.
+ * Rationale: when the user scans a second photo ("add another photo"), they
+ * intend to ADD new rows from that page, not overwrite what they already
+ * carefully scanned/edited. The AI often re-reads nutrients it knows from context
+ * (hallucination or partial label visibility) with wrong amounts — existing-wins
+ * prevents those hallucinations from corrupting already-correct data.
  *
- * Use mergeNutrientsDedup() when you specifically want to keep the higher value
- * (e.g. to de-duplicate sub-form rows within a single scan result).
+ * To deliberately replace existing data, use "Re-scan (replace all)" which calls
+ * clearUserLabelNutrients() first, so existing is empty and incoming wins by default.
  */
 export function mergeNutrients(existing: LabelNutrient[], incoming: LabelNutrient[]): LabelNutrient[] {
   const map = new Map<string, LabelNutrient>();
-  // Load existing first
+  // Load existing first — these are locked in
   for (const n of existing) map.set(canonicalizeNutrient(n.name), n);
-  // Incoming overwrites — new photo data beats stored data
-  for (const n of incoming) map.set(canonicalizeNutrient(n.name), n);
+  // Only add nutrients that don’t already exist (existing wins)
+  for (const n of incoming) {
+    const key = canonicalizeNutrient(n.name);
+    if (!map.has(key)) map.set(key, n);
+  }
   return Array.from(map.values());
 }
 
