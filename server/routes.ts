@@ -3,6 +3,9 @@ import type { Server } from "http";
 import { registerAuthRoutes, requireAuth, type AuthRequest } from "./auth";
 import { storage } from "./storage";
 import type { Response } from "express";
+import * as fs from "fs";
+import * as path from "path";
+import * as crypto from "crypto";
 
 export async function registerRoutes(httpServer: Server, app: Express) {
   registerAuthRoutes(app);
@@ -343,38 +346,49 @@ CRITICAL RULE on hasSplitDose — read carefully:
     } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
-  // POST /api/supplements/:id/scan-label — vision OCR of a label photo, store nutrients
+  // Temp image store: token -> { filePath, expires }
+  const tempImages = new Map<string, { filePath: string; expires: number }>();
+
+  // GET /api/supplements/label-img/:token — serve a temporarily stored label image
+  // Used so sonar-pro can fetch the image via a public HTTPS URL
+  app.get("/api/supplements/label-img/:token", (req, res) => {
+    const entry = tempImages.get(req.params.token);
+    if (!entry || Date.now() > entry.expires) {
+      tempImages.delete(req.params.token);
+      return res.status(404).send("Not found");
+    }
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "no-store");
+    const stream = fs.createReadStream(entry.filePath);
+    stream.on("error", () => res.status(404).send("Not found"));
+    stream.pipe(res);
+  });
+
+  // POST /api/supplements/:id/scan-label — label OCR + nutrient extraction
+  //
+  // Strategy:
+  //   1. Save the compressed image to /tmp so we can serve it at a public HTTPS URL
+  //   2. Pass that URL to sonar-pro vision (base64 data URIs return 500 from Perplexity)
+  //   3. Parse the JSON response
+  //   4. If vision fails or returns empty nutrients, fall back to text-based lookup by product name
+  //   5. Store the nutrients on the supplement row
   app.post("/api/supplements/:id/scan-label", requireAuth, async (req: AuthRequest, res: Response) => {
-    try {
-      const apiKey = process.env.PERPLEXITY_API_KEY;
-      if (!apiKey) return res.status(500).json({ error: "AI not configured" });
-      const id = parseInt(req.params.id);
-      const supplements = await storage.getUserSupplements(req.userId!);
-      const supp = supplements.find(s => s.id === id);
-      if (!supp) return res.status(403).json({ error: "Access denied" });
+    const apiKey = process.env.PERPLEXITY_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "AI not configured" });
 
-      const { imageBase64, mimeType } = req.body as { imageBase64: string; mimeType: string };
-      if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
+    const id = parseInt(req.params.id);
+    const supplements = await storage.getUserSupplements(req.userId!);
+    const supp = supplements.find(s => s.id === id);
+    if (!supp) return res.status(403).json({ error: "Access denied" });
 
-      console.log(`[scan-label] supplementId=${id} imageBase64 length=${imageBase64.length} (~${Math.round(imageBase64.length * 0.75 / 1024)}KB)`);
+    const { imageBase64, mimeType } = req.body as { imageBase64: string; mimeType?: string };
+    if (!imageBase64) return res.status(400).json({ error: "imageBase64 required" });
 
-      const aiRes = await fetch("https://api.perplexity.ai/chat/completions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "sonar-pro",
-          messages: [{
-            role: "user",
-            content: [
-              {
-                type: "image_url",
-                image_url: { url: `data:${mimeType || "image/jpeg"};base64,${imageBase64}` },
-              },
-              {
-                type: "text",
-                text: `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no explanation, no code fences. Output must start with { and end with }.
+    console.log(`[scan-label] id=${id} name="${supp.name}" payload ~${Math.round(imageBase64.length * 0.75 / 1024)}KB`);
 
-Return exactly this shape:
+    const PPLX_PROMPT = `Extract every nutrient/ingredient from this supplement label. RESPOND ONLY WITH VALID JSON — no markdown, no explanation, no code fences.
+
+Return exactly:
 {
   "productName": "exact product name from label",
   "servingSize": "e.g. 3 capsules",
@@ -383,38 +397,77 @@ Return exactly this shape:
   ]
 }
 
-Include every line from the Supplement Facts panel. Use exact amounts shown. If a nutrient has no Daily Value, set dailyValue to "".`,
-              },
-            ],
-          }],
-          max_tokens: 3000,
-        }),
+List every row from the Supplement Facts panel. Use exact amounts. Set dailyValue to "" if not listed.`;
+
+    function extractJson(raw: string): any {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start === -1 || end === -1) throw new Error("No JSON in response");
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+
+    async function callPplx(content: any[]): Promise<any | null> {
+      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "sonar-pro", messages: [{ role: "user", content }], max_tokens: 3000 }),
       });
+      if (!r.ok) { console.error(`[scan-label] pplx ${r.status}:`, await r.text()); return null; }
+      const d = await r.json() as any;
+      const raw: string = d.choices?.[0]?.message?.content || "";
+      console.log(`[scan-label] pplx raw (200 chars):`, raw.substring(0, 200));
+      try { return extractJson(raw); } catch { return null; }
+    }
 
-      if (!aiRes.ok) {
-        const errText = await aiRes.text();
-        console.error(`[scan-label] Perplexity error ${aiRes.status}:`, errText);
-        return res.status(502).json({ error: `AI service error: ${aiRes.status}` });
+    try {
+      // ── Step 1: Save image to /tmp and expose as public HTTPS URL ──────────────
+      const token = crypto.randomBytes(16).toString("hex");
+      const tmpDir = "/tmp/prx-labels";
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+      const filePath = path.join(tmpDir, `${token}.jpg`);
+      fs.writeFileSync(filePath, Buffer.from(imageBase64, "base64"));
+      // Expire in 5 minutes
+      tempImages.set(token, { filePath, expires: Date.now() + 5 * 60 * 1000 });
+
+      const appUrl = process.env.APP_URL || "https://protocolrx-production.up.railway.app";
+      const imageUrl = `${appUrl}/api/supplements/label-img/${token}`;
+      console.log(`[scan-label] serving image at ${imageUrl}`);
+
+      // ── Step 2: Vision call with public URL ──────────────────────────────────
+      let parsed = await callPplx([
+        { type: "text", text: PPLX_PROMPT },
+        { type: "image_url", image_url: { url: imageUrl } },
+      ]);
+
+      // ── Step 3: Fallback — text-based web lookup by product name ─────────────
+      if (!parsed || !Array.isArray(parsed.nutrients) || parsed.nutrients.length === 0) {
+        console.log(`[scan-label] vision returned empty/null — falling back to text lookup for "${supp.name}"`);
+        parsed = await callPplx([{
+          type: "text",
+          text: `Look up the exact supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+
+Return:
+{
+  "productName": "exact product name",
+  "servingSize": "serving size from label",
+  "nutrients": [
+    { "name": "nutrient name", "amount": "amount", "unit": "unit", "dailyValue": "% daily value or empty string" }
+  ]
+}
+
+List every nutrient/ingredient from the Supplement Facts panel with exact label amounts. Search iHerb, manufacturer website, or FDA databases for the real label data.`,
+        }]);
       }
 
-      const aiData = await aiRes.json() as any;
-      const raw: string = aiData.choices?.[0]?.message?.content || "{}";
-      console.log(`[scan-label] raw AI response (first 300 chars):`, raw.substring(0, 300));
+      // ── Cleanup temp image ───────────────────────────────────────────────────
+      try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+      tempImages.delete(token);
 
-      let parsed: any;
-      try {
-        // Extract the outermost JSON object — handles trailing citations or extra text
-        const start = raw.indexOf("{");
-        const end = raw.lastIndexOf("}");
-        if (start === -1 || end === -1) throw new Error("No JSON object in response");
-        parsed = JSON.parse(raw.slice(start, end + 1));
-      } catch (parseErr: any) {
-        console.error("[scan-label] JSON parse failed:", parseErr.message, "raw:", raw.substring(0, 500));
-        return res.status(500).json({ error: "Could not read label. Try a clearer, well-lit photo of the Supplement Facts panel." });
+      if (!parsed || !Array.isArray(parsed.nutrients)) {
+        return res.status(500).json({ error: "Could not extract label data. Try a clearer photo or check the supplement name." });
       }
 
-      // Store the nutrients on this supplement
-      await storage.saveLabelNutrients(id, parsed.nutrients || []);
+      await storage.saveLabelNutrients(id, parsed.nutrients);
       res.json(parsed);
     } catch (e: any) {
       console.error("[scan-label] unexpected error:", e);
