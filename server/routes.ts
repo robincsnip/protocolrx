@@ -431,15 +431,16 @@ CRITICAL RULE on hasSplitDose — read carefully:
 
     // Real vision OCR: GPT-5.4 via the Perplexity Agent API (/v1/responses).
     // Image URL is embedded in the text prompt — GPT-5.4 fetches and reads it directly.
-    // This model does NOT web-search-augment its vision output, so it only returns
-    // what is literally visible in the photo.
     async function callVision(imageUrl: string): Promise<any | null> {
       const prompt = `You are a document scanner reading a supplement label photograph.
 READ ONLY what is literally printed and visible in this image.
-DO NOT add, infer, or supplement with any outside knowledge or web data.
+DO NOT add, infer, or use any outside knowledge or web data about this product.
 If you cannot clearly read a value, omit that row — do not guess.
 
-RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
+SCAN THE ENTIRE IMAGE from top to bottom. Do not stop after a few rows.
+Every single line in the Supplement Facts panel must be included.
+
+RESPOND ONLY WITH VALID JSON — no markdown, no code fences, nothing else.
 
 {
   "productName": "exact product name visible in image",
@@ -450,11 +451,11 @@ RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
 }
 
 RULES:
-- Only include rows you can directly read from the Supplement Facts panel in this image.
+- Include EVERY row from the Supplement Facts panel — scan all the way to the bottom.
 - Use the SIMPLE unit ("mcg" not "mcg DFE", "mg" not "mg NE").
 - When a nutrient has both a total and an indented sub-form, output ONLY the top-level total row.
-- Set dailyValue to "" if not listed.
-- If the image shows no supplement facts panel, return {"productName":"","servingSize":"","nutrients":[]}
+- Set dailyValue to "" if not listed on the label.
+- If the image shows no supplement facts panel at all, return {"productName":"","servingSize":"","nutrients":[]}
 
 Image: ${imageUrl}`;
 
@@ -464,13 +465,13 @@ Image: ${imageUrl}`;
         body: JSON.stringify({
           model: "openai/gpt-5.4",
           input: [{ role: "user", content: prompt }],
-          max_output_tokens: 4000,
+          max_output_tokens: 8000,
         }),
       });
       if (!r.ok) { console.error(`[scan-label] vision ${r.status}:`, await r.text()); return null; }
       const d = await r.json() as any;
       const raw: string = d.output?.[0]?.content?.[0]?.text || "";
-      console.log(`[scan-label] vision raw (300 chars):`, raw.substring(0, 300));
+      console.log(`[scan-label] vision raw (500 chars):`, raw.substring(0, 500));
       try { return extractJson(raw); } catch { return null; }
     }
 

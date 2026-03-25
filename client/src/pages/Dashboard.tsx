@@ -427,14 +427,17 @@ function SupplementsTab({ userId }: { userId: number }) {
     labelInputRef.current?.click();
   }
 
-  /** Compress an image File to a JPEG base64 string. Max 1400px on longest side, quality 0.75. */
+  /** Compress an image File to a JPEG base64 string.
+   * 2400px max / quality 0.88 — high enough to keep supplement label text legible.
+   * Typical output: 400-700KB, well under the 10MB server limit.
+   */
   async function compressImage(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const img = new Image();
       const objectUrl = URL.createObjectURL(file);
       img.onload = () => {
         URL.revokeObjectURL(objectUrl);
-        const MAX = 1400;
+        const MAX = 2400; // high enough for fine supplement label text
         let { width, height } = img;
         if (width > MAX || height > MAX) {
           if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
@@ -446,7 +449,7 @@ function SupplementsTab({ userId }: { userId: number }) {
         const ctx = canvas.getContext("2d");
         if (!ctx) return reject(new Error("Canvas not supported"));
         ctx.drawImage(img, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.88);
         resolve(dataUrl.split(",")[1]);
       };
       img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("Failed to load image")); };
