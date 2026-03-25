@@ -1,7 +1,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
 import { registerAuthRoutes, requireAuth, type AuthRequest } from "./auth";
-import { storage, canonicalizeNutrient, productSlug } from "./storage";
+import { storage, canonicalizeNutrient, productSlug, mergeNutrients, deduplicateScan } from "./storage";
 import type { Response } from "express";
 import * as fs from "fs";
 import * as path from "path";
@@ -478,12 +478,21 @@ RULES:
         { type: "image_url", image_url: { url: imageUrl } },
       ]);
 
-      // ── Step 3: Text lookup — always run when vision returns < 5 nutrients ──────
-      // Vision may only see part of the label; text search fills the gaps.
-      // Results are MERGED with whatever vision found, deduplication handled by mergeNutrients.
+      // ── Step 3: De-duplicate within the single scan result ───────────────────
+      // Removes sub-form duplicates (e.g. "Folate" + "Folic Acid" in same response)
+      if (parsed && Array.isArray(parsed.nutrients)) {
+        parsed.nutrients = deduplicateScan(parsed.nutrients);
+      }
+
       const visionCount = Array.isArray(parsed?.nutrients) ? parsed.nutrients.length : 0;
-      if (visionCount < 5) {
-        console.log(`[scan-label] vision returned ${visionCount} nutrients — running text lookup to complete picture`);
+      console.log(`[scan-label] vision returned ${visionCount} nutrients`);
+
+      // ── Step 4 (last resort): text lookup ONLY when vision completely failed ─────
+      // DO NOT merge text-search results with vision results — web data may be a
+      // different product version. Use photo as ground truth; text only fills a
+      // total blank (can't read photo at all).
+      if (visionCount === 0) {
+        console.log(`[scan-label] vision returned nothing — falling back to text lookup for "${supp.name}"`);
         const textParsed = await callPplx([{
           type: "text",
           text: `Look up the COMPLETE supplement facts label for "${supp.name}"${supp.dose ? ` ${supp.dose}${supp.unit}` : ""}. RESPOND ONLY WITH VALID JSON — no markdown, no code fences.
@@ -498,15 +507,12 @@ Return:
 }
 
 IMPORTANT: Include ALL nutrients — every single row from the label. Do not truncate.
-Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total for each nutrient, skip indented sub-forms.
+Use the SIMPLE unit ("mcg" not "mcg DFE"). Output ONLY the top-level total; skip indented sub-forms.
 Search iHerb, manufacturer website, Examine.com, or FDA databases for the real label data.`,
         }]);
         if (textParsed && Array.isArray(textParsed.nutrients) && textParsed.nutrients.length > 0) {
-          // Merge: take best of vision + text (keeps higher amount per canonical key)
-          const { mergeNutrients } = await import("./storage");
-          const combined = mergeNutrients(parsed?.nutrients ?? [], textParsed.nutrients);
-          parsed = { ...(textParsed), nutrients: combined };
-          console.log(`[scan-label] after merge: ${combined.length} nutrients (vision:${visionCount} + text:${textParsed.nutrients.length})`);
+          parsed = { ...textParsed, nutrients: deduplicateScan(textParsed.nutrients) };
+          console.log(`[scan-label] text lookup returned ${parsed.nutrients.length} nutrients`);
         }
       }
 
@@ -528,6 +534,20 @@ Search iHerb, manufacturer website, Examine.com, or FDA databases for the real l
       console.error("[scan-label] unexpected error:", e);
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // PUT /api/supplements/:id/label-nutrients — save manually edited nutrients (full replace)
+  app.put("/api/supplements/:id/label-nutrients", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const id = parseInt(req.params.id);
+      const supplements = await storage.getUserSupplements(req.userId!);
+      if (!supplements.find(s => s.id === id)) return res.status(403).json({ error: "Access denied" });
+      const { nutrients } = req.body as { nutrients: object[] };
+      if (!Array.isArray(nutrients)) return res.status(400).json({ error: "nutrients array required" });
+      // Manual edit = full replace, skip merge
+      await storage.saveManualNutrients(id, nutrients);
+      res.json({ ok: true });
+    } catch (e: any) { res.status(500).json({ error: e.message }); }
   });
 
   // DELETE /api/supplements/:id/label — clear a user's stored label nutrients for one supplement

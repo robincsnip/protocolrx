@@ -26,6 +26,7 @@ interface CrossRefResult { summary: string; conflicts: { protocolA: string; prot
   dosageTotals: { supplement: string; totalDose: string; safetyNote: string }[];
   sequenceRecommendations: string[]; overallRisk: "low" | "moderate" | "high"; }
 interface UserSupplement { id: number; name: string; dose: string; unit: string; frequency: string; notes: string | null; }
+interface LabelNutrient { name: string; amount: string; unit: string; dailyValue?: string; }
 interface SupplementAnalysis {
   summary: string;
   overallRisk: "low" | "moderate" | "high";
@@ -308,6 +309,9 @@ function SupplementsTab({ userId }: { userId: number }) {
   const [scanningId, setScanningId] = useState<number | null>(null);
   const labelInputRef = useRef<HTMLInputElement>(null);
   const scanTargetIdRef = useRef<number | null>(null);
+  // nutrient editor: which supplement is open, and its working copy of rows
+  const [editingNutrientsId, setEditingNutrientsId] = useState<number | null>(null);
+  const [editingRows, setEditingRows] = useState<LabelNutrient[]>([]);
 
   const { data: supplements, refetch } = useQuery<UserSupplement[]>({
     queryKey: ["/api/supplements"],
@@ -501,6 +505,24 @@ function SupplementsTab({ userId }: { userId: number }) {
     },
     onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
+
+  const saveNutrientsMutation = useMutation({
+    mutationFn: ({ id, nutrients }: { id: number; nutrients: LabelNutrient[] }) =>
+      apiRequest("PUT", `/api/supplements/${id}/label-nutrients`, { nutrients }),
+    onSuccess: () => {
+      refetch();
+      queryClient.invalidateQueries({ queryKey: ["/api/supplements"] });
+      setEditingNutrientsId(null);
+      toast({ title: "Saved", description: "Nutrient data updated." });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+  });
+
+  function openNutrientEditor(s: UserSupplement) {
+    const existing = ((s as any).labelNutrients as LabelNutrient[] | null) ?? [];
+    setEditingRows(existing.map(n => ({ ...n })));
+    setEditingNutrientsId(s.id);
+  }
 
   async function runAnalysis() {
     setAnalysing(true); setAnalysis(null);
@@ -726,7 +748,8 @@ function SupplementsTab({ userId }: { userId: number }) {
       ) : (
         <div className="space-y-2">
           {(supplements ?? []).map(s => (
-            <div key={s.id} className="flex items-center gap-4 rounded-xl border border-border/60 bg-card px-4 py-3">
+            <div key={s.id}>
+            <div className="flex items-center gap-4 rounded-xl border border-border/60 bg-card px-4 py-3">
               {/* Dosage — the primary fact */}
               <div className="shrink-0 text-center min-w-[56px]">
                 <p className="text-lg font-bold text-foreground leading-none">{s.dose}</p>
@@ -765,6 +788,11 @@ function SupplementsTab({ userId }: { userId: number }) {
                       </DropdownMenuItem>
                     )}
                     {hasLabel(s) && (<>
+                      <DropdownMenuItem onClick={() => openNutrientEditor(s)}>
+                        <Pencil className="w-3.5 h-3.5 mr-2" />
+                        Edit nutrients
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
                       <DropdownMenuItem onClick={() => openLabelScanner(s.id, "merge")}>
                         <Camera className="w-3.5 h-3.5 mr-2" />
                         Add another photo
@@ -800,6 +828,65 @@ function SupplementsTab({ userId }: { userId: number }) {
                   <Trash2 className="w-3.5 h-3.5" />
                 </button>
               </div>
+            </div>
+
+            {editingNutrientsId === s.id && (
+              <div className="border-t border-border/40 bg-muted/20 px-4 py-3 space-y-2">
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">Edit nutrients — {s.name}</p>
+                <div className="space-y-1.5">
+                  {editingRows.map((row, i) => (
+                    <div key={i} className="flex items-center gap-2">
+                      <input
+                        className="flex-1 min-w-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-violet-500/60"
+                        placeholder="Nutrient name"
+                        value={row.name}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, name: e.target.value } : r))}
+                      />
+                      <input
+                        className="w-20 shrink-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground text-right focus:outline-none focus:border-violet-500/60"
+                        placeholder="Amount"
+                        value={row.amount}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, amount: e.target.value } : r))}
+                      />
+                      <input
+                        className="w-16 shrink-0 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:border-violet-500/60"
+                        placeholder="Unit"
+                        value={row.unit}
+                        onChange={e => setEditingRows(rows => rows.map((r, j) => j === i ? { ...r, unit: e.target.value } : r))}
+                      />
+                      <button
+                        onClick={() => setEditingRows(rows => rows.filter((_, j) => j !== i))}
+                        className="p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors shrink-0"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  onClick={() => setEditingRows(rows => [...rows, { name: "", amount: "", unit: "mg", dailyValue: "" }])}
+                  className="flex items-center gap-1.5 text-xs text-violet-400 hover:text-violet-300 transition-colors mt-1"
+                >
+                  <Plus className="w-3.5 h-3.5" /> Add row
+                </button>
+                <div className="flex gap-2 pt-1">
+                  <button
+                    onClick={() => saveNutrientsMutation.mutate({ id: s.id, nutrients: editingRows.filter(r => r.name.trim()) })}
+                    disabled={saveNutrientsMutation.isPending}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-xs font-medium transition-colors disabled:opacity-50"
+                  >
+                    {saveNutrientsMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                    Save
+                  </button>
+                  <button
+                    onClick={() => setEditingNutrientsId(null)}
+                    className="px-3 py-1.5 rounded-lg border border-border/60 text-xs text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
             </div>
           ))}
         </div>

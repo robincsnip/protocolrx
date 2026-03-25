@@ -90,27 +90,43 @@ export function canonicalizeNutrient(name: string): string {
 interface LabelNutrient { name: string; amount: string; unit: string; dailyValue?: string; }
 
 /**
- * Merge two arrays of label nutrients.
- * For nutrients with the same canonical key, keep the entry with the HIGHEST
- * numeric amount (safe assumption: if the same nutrient appears on two label
- * pages, one is likely a sub-form and the other is the total).
- * Preserves the display name and unit from whichever entry has the higher amount.
+ * Merge two arrays of label nutrients for multi-photo scanning.
+ *
+ * Strategy: INCOMING WINS.
+ * - If a nutrient key appears in both arrays, the incoming value replaces existing.
+ *   (The new photo is more deliberate/recent than whatever was stored before.)
+ * - If a nutrient key only appears in existing, it is kept.
+ * - If a nutrient key only appears in incoming, it is added.
+ *
+ * This means scanning a second photo of the same label correctly adds new rows
+ * and corrects any misread values from the first scan.
+ *
+ * Use mergeNutrientsDedup() when you specifically want to keep the higher value
+ * (e.g. to de-duplicate sub-form rows within a single scan result).
  */
 export function mergeNutrients(existing: LabelNutrient[], incoming: LabelNutrient[]): LabelNutrient[] {
-  // Build a map keyed by canonical name — value is the current best entry + its numeric amount
-  const map = new Map<string, { entry: LabelNutrient; numericAmount: number }>();
+  const map = new Map<string, LabelNutrient>();
+  // Load existing first
+  for (const n of existing) map.set(canonicalizeNutrient(n.name), n);
+  // Incoming overwrites — new photo data beats stored data
+  for (const n of incoming) map.set(canonicalizeNutrient(n.name), n);
+  return Array.from(map.values());
+}
 
-  for (const n of [...existing, ...incoming]) {
+/**
+ * De-duplicate within a SINGLE scan result.
+ * When the AI returns both a total row and an indented sub-form row for the same
+ * nutrient, keep the one with the higher numeric amount (= the total).
+ * Only used internally to clean up a single scan before storing.
+ */
+export function deduplicateScan(nutrients: LabelNutrient[]): LabelNutrient[] {
+  const map = new Map<string, { entry: LabelNutrient; amt: number }>();
+  for (const n of nutrients) {
     const key = canonicalizeNutrient(n.name);
     const amt = parseFloat(n.amount) || 0;
-    const existing = map.get(key);
-    // Keep whichever entry has the higher amount
-    // (same nutrient listed as total + sub-form — use the total)
-    if (!existing || amt > existing.numericAmount) {
-      map.set(key, { entry: n, numericAmount: amt });
-    }
+    const cur = map.get(key);
+    if (!cur || amt > cur.amt) map.set(key, { entry: n, amt });
   }
-
   return Array.from(map.values()).map(v => v.entry);
 }
 
@@ -564,6 +580,13 @@ export const storage = {
     await pool.query(
       `UPDATE prx_user_supplements SET label_nutrients = NULL WHERE id = $1`,
       [supplementId]
+    );
+  },
+
+  async saveManualNutrients(id: number, nutrients: object[]): Promise<void> {
+    await pool.query(
+      `UPDATE prx_user_supplements SET label_nutrients = $1::jsonb WHERE id = $2`,
+      [JSON.stringify(nutrients), id]
     );
   },
 
