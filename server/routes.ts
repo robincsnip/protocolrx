@@ -422,10 +422,19 @@ CRITICAL RULE on hasSplitDose — read carefully:
       await storage.clearUserLabelNutrients(id);
     }
 
-    // VISION prompt: strict "only what you literally see" instruction.
-    // search_context_size: "low" minimises sonar-pro's web augmentation so it
-    // relies more on the image and less on training/search data.
-    const VISION_PROMPT = `You are a document scanner reading a supplement label photograph.
+    function extractJson(raw: string): any {
+      const start = raw.indexOf("{");
+      const end = raw.lastIndexOf("}");
+      if (start === -1 || end === -1) throw new Error("No JSON in response");
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+
+    // Real vision OCR: GPT-5.4 via the Perplexity Agent API (/v1/responses).
+    // Image URL is embedded in the text prompt — GPT-5.4 fetches and reads it directly.
+    // This model does NOT web-search-augment its vision output, so it only returns
+    // what is literally visible in the photo.
+    async function callVision(imageUrl: string): Promise<any | null> {
+      const prompt = `You are a document scanner reading a supplement label photograph.
 READ ONLY what is literally printed and visible in this image.
 DO NOT add, infer, or supplement with any outside knowledge or web data.
 If you cannot clearly read a value, omit that row — do not guess.
@@ -445,39 +454,27 @@ RULES:
 - Use the SIMPLE unit ("mcg" not "mcg DFE", "mg" not "mg NE").
 - When a nutrient has both a total and an indented sub-form, output ONLY the top-level total row.
 - Set dailyValue to "" if not listed.
-- If the image shows no supplement facts panel, return { "productName": "", "servingSize": "", "nutrients": [] }`;
+- If the image shows no supplement facts panel, return {"productName":"","servingSize":"","nutrients":[]}
 
-    function extractJson(raw: string): any {
-      const start = raw.indexOf("{");
-      const end = raw.lastIndexOf("}");
-      if (start === -1 || end === -1) throw new Error("No JSON in response");
-      return JSON.parse(raw.slice(start, end + 1));
-    }
+Image: ${imageUrl}`;
 
-    // Vision call: image URL + strict prompt, web search minimised
-    async function callVision(imageUrl: string): Promise<any | null> {
-      const r = await fetch("https://api.perplexity.ai/chat/completions", {
+      const r = await fetch("https://api.perplexity.ai/v1/responses", {
         method: "POST",
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "sonar-pro",
-          messages: [{ role: "user", content: [
-            { type: "text", text: VISION_PROMPT },
-            { type: "image_url", image_url: { url: imageUrl } },
-          ]}],
-          max_tokens: 4000,
-          web_search_options: { search_context_size: "low" },
+          model: "openai/gpt-5.4",
+          input: [{ role: "user", content: prompt }],
+          max_output_tokens: 4000,
         }),
       });
       if (!r.ok) { console.error(`[scan-label] vision ${r.status}:`, await r.text()); return null; }
       const d = await r.json() as any;
-      const raw: string = d.choices?.[0]?.message?.content || "";
+      const raw: string = d.output?.[0]?.content?.[0]?.text || "";
       console.log(`[scan-label] vision raw (300 chars):`, raw.substring(0, 300));
       try { return extractJson(raw); } catch { return null; }
     }
 
-    // Text search call: used ONLY as last-resort fallback when vision returns 0 rows
-    // and the user has no existing label data at all (first scan, unreadable photo)
+    // Text search fallback: used ONLY when vision returns 0 AND no existing data
     async function callTextSearch(name: string, dose: string, unit: string): Promise<any | null> {
       const r = await fetch("https://api.perplexity.ai/chat/completions", {
         method: "POST",
