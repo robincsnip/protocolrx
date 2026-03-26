@@ -208,11 +208,13 @@ async function initSchema() {
       type TEXT NOT NULL,
       title TEXT NOT NULL,
       body TEXT,
+      nudge_time TEXT DEFAULT '08:00',
       scheduled_for TIMESTAMPTZ,
       sent_at TIMESTAMPTZ,
       read_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+    ALTER TABLE prx_nudges ADD COLUMN IF NOT EXISTS nudge_time TEXT DEFAULT '08:00';
 
     CREATE TABLE IF NOT EXISTS prx_user_supplements (
       id SERIAL PRIMARY KEY,
@@ -287,6 +289,7 @@ function mapUserProtocol(row: any): UserProtocol & { protocol?: Protocol } {
 function mapNudge(row: any): Nudge {
   return { id: row.id, userId: row.user_id, userProtocolId: row.user_protocol_id,
     type: row.type, title: row.title, body: row.body ?? null,
+    nudgeTime: row.nudge_time ?? "08:00",
     scheduledFor: row.scheduled_for ?? null, sentAt: row.sent_at ?? null,
     readAt: row.read_at ?? null, createdAt: row.created_at };
 }
@@ -476,14 +479,30 @@ export const storage = {
     );
     return rows.map(mapNudge);
   },
-  async createNudge(data: { userId: number; userProtocolId: number; type: string; title: string; body?: string }): Promise<void> {
+  async createNudge(data: { userId: number; userProtocolId: number; type: string; title: string; body?: string; nudgeTime?: string }): Promise<void> {
     await pool.query(
-      `INSERT INTO prx_nudges (user_id, user_protocol_id, type, title, body) VALUES ($1,$2,$3,$4,$5)`,
-      [data.userId, data.userProtocolId, data.type, data.title, data.body ?? null]
+      `INSERT INTO prx_nudges (user_id, user_protocol_id, type, title, body, nudge_time) VALUES ($1,$2,$3,$4,$5,$6)`,
+      [data.userId, data.userProtocolId, data.type, data.title, data.body ?? null, data.nudgeTime ?? "08:00"]
     );
   },
   async markNudgeRead(id: number): Promise<void> {
     await pool.query(`UPDATE prx_nudges SET read_at = NOW() WHERE id = $1`, [id]);
+  },
+  async updateNudgeTime(id: number, nudgeTime: string): Promise<void> {
+    await pool.query(`UPDATE prx_nudges SET nudge_time = $1 WHERE id = $2`, [nudgeTime, id]);
+  },
+  async updateNudgeBody(id: number, body: string): Promise<void> {
+    await pool.query(`UPDATE prx_nudges SET body = $1 WHERE id = $2`, [body, id]);
+  },
+
+  async getAllDailyNudges(userId: number): Promise<Nudge[]> {
+    const { rows } = await pool.query(
+      `SELECT * FROM prx_nudges
+       WHERE user_id = $1 AND type = 'daily_reminder'
+       ORDER BY nudge_time ASC, created_at DESC`,
+      [userId]
+    );
+    return rows.map(mapNudge);
   },
 
   // ── Daily nudge generator (called on schedule) ─────────────────────────────

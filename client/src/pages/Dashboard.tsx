@@ -21,7 +21,7 @@ interface Protocol { id: number; name: string; description: string | null; categ
   contraindications: string | null; sourceModule: string; }
 interface UserProtocol { id: number; protocolId: number; status: string; adherenceScore: number | null;
   lastCheckinAt: string | null; conflictFlag: boolean; conflictDetails: any; protocol?: Protocol; startedAt: string; }
-interface Nudge { id: number; type: string; title: string; body: string | null; createdAt: string; userProtocolId: number; readAt?: string | null; }
+interface Nudge { id: number; type: string; title: string; body: string | null; nudgeTime: string; createdAt: string; userProtocolId: number; readAt?: string | null; }
 interface CrossRefResult { summary: string; conflicts: { protocolA: string; protocolB: string; reason: string }[];
   dosageTotals: { supplement: string; totalDose: string; safetyNote: string }[];
   sequenceRecommendations: string[]; overallRisk: "low" | "moderate" | "high"; }
@@ -264,6 +264,94 @@ function ActiveProtocolCard({ up, onCheckin, onPause, onResume, onComplete }: {
           onResume={onResume}
           onComplete={onComplete}
         />
+      )}
+    </div>
+  );
+}
+
+// ─── NudgeCard ────────────────────────────────────────────────────────────────
+function NudgeCard({ nudge, onSave, isSaving }: {
+  nudge: Nudge;
+  onSave: (nudgeTime: string, body: string) => void;
+  isSaving: boolean;
+}) {
+  const [editingTime, setEditingTime] = useState(false);
+  const [editingBody, setEditingBody] = useState(false);
+  const [time, setTime] = useState(nudge.nudgeTime ?? "08:00");
+  const [body, setBody] = useState(nudge.body ?? "");
+
+  function formatTime(t: string) {
+    const [h, m] = t.split(":").map(Number);
+    const ampm = h >= 12 ? "PM" : "AM";
+    const hh = h % 12 || 12;
+    return `${hh}:${String(m).padStart(2, "0")} ${ampm}`;
+  }
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-card p-4">
+      <div className="flex items-start gap-3">
+        {/* Time badge — tappable to edit */}
+        <button
+          onClick={() => setEditingTime(v => !v)}
+          className="shrink-0 min-w-[60px] text-center bg-primary/10 border border-primary/20 rounded-lg px-2 py-2 hover:bg-primary/20 transition-colors"
+        >
+          <p className="text-xs font-bold text-primary leading-none">{formatTime(time)}</p>
+          <p className="text-[9px] text-muted-foreground mt-0.5">daily</p>
+        </button>
+
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-semibold text-foreground leading-snug">{nudge.title}</p>
+          {/* Body — tappable to edit */}
+          {editingBody ? (
+            <div className="mt-1.5 space-y-1.5">
+              <textarea
+                className="w-full bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground resize-none focus:outline-none focus:border-primary/60"
+                rows={3}
+                value={body}
+                onChange={e => setBody(e.target.value)}
+              />
+              <div className="flex gap-1.5">
+                <button
+                  onClick={() => { onSave(time, body); setEditingBody(false); }}
+                  disabled={isSaving}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-primary/15 text-primary text-xs font-medium hover:bg-primary/25 transition-colors disabled:opacity-50"
+                >
+                  <Check className="w-3 h-3" /> Save
+                </button>
+                <button onClick={() => { setBody(nudge.body ?? ""); setEditingBody(false); }}
+                  className="px-2.5 py-1 rounded-lg border border-border/60 text-xs text-muted-foreground hover:text-foreground transition-colors">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setEditingBody(true)} className="w-full text-left">
+              <p className="text-xs text-muted-foreground mt-0.5 hover:text-foreground transition-colors">
+                {nudge.body || <span className="italic opacity-60">Tap to add instruction…</span>}
+              </p>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Time editor */}
+      {editingTime && (
+        <div className="mt-3 pt-3 border-t border-border/40 flex items-center gap-3">
+          <p className="text-xs text-muted-foreground shrink-0">Reminder time</p>
+          <input
+            type="time"
+            value={time}
+            onChange={e => setTime(e.target.value)}
+            className="flex-1 bg-background border border-border/60 rounded-lg px-2.5 py-1.5 text-xs text-foreground focus:outline-none focus:border-primary/60"
+          />
+          <button
+            onClick={() => { onSave(time, body); setEditingTime(false); }}
+            disabled={isSaving}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-primary/15 text-primary text-xs font-medium hover:bg-primary/25 transition-colors disabled:opacity-50"
+          >
+            <Check className="w-3 h-3" /> Save
+          </button>
+        </div>
       )}
     </div>
   );
@@ -1139,10 +1227,10 @@ function CrossRefPanel({ result }: { result: CrossRefResult }) {
         </span>
       </div>
 
-      {result.conflicts.length > 0 && (
+      {(result.conflicts ?? []).length > 0 && (
         <div className="space-y-2">
           <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">Conflicts</p>
-          {result.conflicts.map((c, i) => (
+          {(result.conflicts ?? []).map((c, i) => (
             <div key={i} className="flex items-start gap-2 bg-amber-500/8 border border-amber-500/20 rounded-lg p-2.5">
               <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5" />
               <div>
@@ -1154,11 +1242,11 @@ function CrossRefPanel({ result }: { result: CrossRefResult }) {
         </div>
       )}
 
-      {result.dosageTotals.length > 0 && (
+      {(result.dosageTotals ?? []).length > 0 && (
         <div className="space-y-2">
           <p className="text-xs font-semibold text-primary uppercase tracking-wide">Combined Dosages</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {result.dosageTotals.map((d, i) => (
+            {(result.dosageTotals ?? []).map((d, i) => (
               <div key={i} className="bg-muted/40 rounded-lg p-2.5">
                 <p className="text-xs font-semibold text-foreground">{d.supplement}</p>
                 <p className="text-xs text-primary font-medium">{d.totalDose}</p>
@@ -1169,10 +1257,10 @@ function CrossRefPanel({ result }: { result: CrossRefResult }) {
         </div>
       )}
 
-      {result.sequenceRecommendations.length > 0 && (
+      {(result.sequenceRecommendations ?? []).length > 0 && (
         <div className="space-y-1.5">
           <p className="text-xs font-semibold text-sky-400 uppercase tracking-wide">Sequence & Timing</p>
-          {result.sequenceRecommendations.map((r, i) => (
+          {(result.sequenceRecommendations ?? []).map((r, i) => (
             <div key={i} className="flex items-start gap-2 text-xs text-foreground/80">
               <span className="w-4 h-4 rounded-full bg-sky-500/15 text-sky-400 font-semibold text-[10px] flex items-center justify-center shrink-0 mt-0.5">{i + 1}</span>
               {r}
@@ -1205,6 +1293,10 @@ export default function Dashboard() {
     staleTime: 0,
   });
   const { data: nudges, refetch: refetchNudges } = useQuery<Nudge[]>({ queryKey: ["/api/nudges"] });
+  const { data: allNudges, refetch: refetchAllNudges } = useQuery<Nudge[]>({
+    queryKey: ["/api/nudges/all"],
+    staleTime: 0,
+  });
 
   const activateM = useMutation({
     mutationFn: (protocolId: number) => apiRequest("POST", `/api/user/protocols/${protocolId}/activate`),
@@ -1231,6 +1323,16 @@ export default function Dashboard() {
   const readNudgeM = useMutation({
     mutationFn: (id: number) => apiRequest("PATCH", `/api/nudges/${id}/read`),
     onSuccess: refetchNudges,
+  });
+  const updateNudgeM = useMutation({
+    mutationFn: ({ id, nudgeTime, body }: { id: number; nudgeTime?: string; body?: string }) =>
+      apiRequest("PATCH", `/api/nudges/${id}`, { nudgeTime, body }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/nudges/all"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/nudges"] });
+      toast({ title: "Reminder updated" });
+    },
+    onError: (e: any) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
 
   async function runCrossRef() {
@@ -1404,31 +1506,24 @@ export default function Dashboard() {
         )}
 
         {tab === "nudges" && (
-          <div className="space-y-2">
-            {(nudges ?? []).length === 0 ? (
+          <div className="space-y-3">
+            <div className="bg-muted/30 border border-border/40 rounded-xl p-3">
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                These reminders show what to do and when for each active protocol. Times are set automatically based on your protocol instructions — tap the time to adjust.
+              </p>
+            </div>
+
+            {(allNudges ?? []).length === 0 ? (
               <div className="rounded-xl border border-dashed border-border/60 p-12 text-center">
                 <Bell className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground">No nudges yet</p>
+                <p className="text-sm text-muted-foreground">No reminders yet</p>
+                <p className="text-xs text-muted-foreground mt-1">Activate a protocol to create reminders.</p>
               </div>
             ) : (
-              (nudges ?? []).map(n => (
-                <div key={n.id} className={`rounded-xl border p-4 flex items-start gap-3 ${!n.readAt ? "border-primary/30 bg-primary/5" : "border-border/40 bg-card"}`}>
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                    n.type === "conflict_alert" ? "bg-amber-500/15" : "bg-primary/15"}`}>
-                    {n.type === "conflict_alert" ? <AlertTriangle className="w-4 h-4 text-amber-400" /> : <Bell className="w-4 h-4 text-primary" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-semibold text-foreground">{n.title}</p>
-                    {n.body && <p className="text-xs text-muted-foreground mt-0.5">{n.body}</p>}
-                    <p className="text-[10px] text-muted-foreground mt-1">{timeAgo(n.createdAt)}</p>
-                  </div>
-                  {!n.readAt && (
-                    <button onClick={() => readNudgeM.mutate(n.id)}
-                      className="p-1 rounded text-muted-foreground hover:text-foreground transition-colors shrink-0">
-                      <XCircle className="w-4 h-4" />
-                    </button>
-                  )}
-                </div>
+              (allNudges ?? []).map(n => (
+                <NudgeCard key={n.id} nudge={n}
+                  onSave={(nudgeTime, body) => updateNudgeM.mutate({ id: n.id, nudgeTime, body })}
+                  isSaving={updateNudgeM.isPending} />
               ))
             )}
           </div>

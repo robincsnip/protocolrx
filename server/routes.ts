@@ -19,6 +19,31 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
   app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "ProtocolRX" }));
 
+  // ── Smart nudge helpers ────────────────────────────────────────────────────
+
+  /** Derive a logical daily reminder time (HH:MM) from protocol dosage + steps text. */
+  function deriveNudgeTime(dosage: string | null, steps: string[] | null): string {
+    const text = [dosage ?? "", ...(steps ?? [])].join(" ").toLowerCase();
+    if (/before bed|bedtime|night|evening|pm\b|sleep/.test(text)) return "21:00";
+    if (/lunch|midday|noon|12/.test(text)) return "12:30";
+    if (/after dinner|with dinner|evening meal/.test(text)) return "19:00";
+    if (/upon waking|empty stomach|fasting|first thing/.test(text)) return "07:00";
+    if (/morning|am\b|breakfast|before meal/.test(text)) return "07:30";
+    return "08:00"; // default
+  }
+
+  /** Build a specific action body for a daily_reminder nudge. */
+  function buildNudgeBody(protocol: { name: string; dosage: string | null; steps: string[] | null }): string {
+    const lines: string[] = [];
+    if (protocol.dosage) lines.push(`Take ${protocol.dosage}`);
+    // First step that looks like an instruction (not a lab-monitoring note)
+    const actionStep = (protocol.steps ?? []).find(s =>
+      !/monitor|track|test|check|blood|lab|measure/i.test(s) && s.length < 120
+    );
+    if (actionStep) lines.push(actionStep);
+    return lines.length > 0 ? lines.join(" — ") : `Follow the ${protocol.name} protocol today.`;
+  }
+
   // ── Protocol library ──────────────────────────────────────────────────────
   // GET all available protocols (public + user's own)
   app.get("/api/protocols", requireAuth, async (req: AuthRequest, res: Response) => {
@@ -72,13 +97,20 @@ export async function registerRoutes(httpServer: Server, app: Express) {
         });
       }
 
-      // Create activation nudge
+      // Create activation nudge with smart time and specific body
+      const nudgeTime = deriveNudgeTime(protocol.dosage, protocol.steps as string[] | null);
+      const nudgeBody = buildNudgeBody({
+        name: protocol.name,
+        dosage: protocol.dosage,
+        steps: protocol.steps as string[] | null,
+      });
       await storage.createNudge({
         userId: req.userId!,
         userProtocolId: userProtocol.id,
         type: "daily_reminder",
-        title: `Protocol started: ${protocol.name}`,
-        body: protocol.steps ? `${(protocol.steps as string[]).length} steps to follow daily.` : undefined,
+        title: protocol.name,
+        body: nudgeBody,
+        nudgeTime,
       });
 
       // Emit event to AXON
@@ -156,6 +188,24 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     try {
       await storage.markNudgeRead(parseInt(req.params.id));
       res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // PATCH /api/nudges/:id — update nudge_time and/or body
+  app.patch("/api/nudges/:id", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const { nudgeTime, body } = req.body as { nudgeTime?: string; body?: string };
+      if (nudgeTime) await storage.updateNudgeTime(parseInt(req.params.id), nudgeTime);
+      if (body !== undefined) await storage.updateNudgeBody(parseInt(req.params.id), body);
+      res.json({ ok: true });
+    } catch (err: any) { res.status(500).json({ error: err.message }); }
+  });
+
+  // GET /api/nudges/all — all daily_reminder nudges for management (incl read), sorted by time
+  app.get("/api/nudges/all", requireAuth, async (req: AuthRequest, res: Response) => {
+    try {
+      const nudges = await storage.getAllDailyNudges(req.userId!);
+      res.json(nudges);
     } catch (err: any) { res.status(500).json({ error: err.message }); }
   });
 
