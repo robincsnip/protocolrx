@@ -3,7 +3,7 @@ import { useQuery, useMutation } from "@tanstack/react-query";
 import { FlaskConical, CheckCircle, AlertTriangle, Bell, Plus, ChevronRight,
   Zap, Play, Pause, XCircle, LogOut, Activity, Loader2,
   ShieldAlert, Stethoscope, Timer, Eye, Pill, Trash2, Pencil, X, Check, Camera, ScanLine,
-  RefreshCw, Flag, XSquare, ChevronDown } from "lucide-react";
+  RefreshCw, Flag, XSquare, ChevronDown, CheckSquare } from "lucide-react";
 import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
